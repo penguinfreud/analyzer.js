@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>analyzer.js</title>
+<script src="base.js"></script>
+<script src="ident.js"></script>
+<script src="analyzer.js"></script>
+<script src="parser.js"></script>
+<script>
+
+var $label = function (labels, node) {
+	if (!(labels instanceof Array)) {
+		labels = [labels];
+	}
+	node.labels = labels;
+	return node;
+};
+
+var program = parser("foo:{while(a){if (b) break foo; else x++;} x++;}");
+
+var run = function () {
+	saveScope(program);
+	program.cfg();
+	ReachDef();
+	
+	computeDominators();
+	computePostDominators();
+	ControlDep();
+};
+</script>
+</head>
+</html>

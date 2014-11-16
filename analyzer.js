@@ -95,7 +95,7 @@ var FuncBase = extend(Scope, {
 	name: "",
 	inferredName: "",
 	
-	unresolvedReferences: null,
+	callers: null,
 	
 	__init__: function () {
 		if (scope) {
@@ -109,7 +109,7 @@ var FuncBase = extend(Scope, {
 		this.nodeIdMap = [];
 		this.nodeList = [];
 		this.initValues = [];
-		this.unresolvedReferences = [];
+		this.callers = [];
 	},
 	
 	setBody: function (body) {
@@ -252,8 +252,6 @@ var Node = extend(Object, {
 		this.flags = 0;
 		this.value = this;
 		this.usedBy = [];
-		this.controlDep = [];
-		this.controlDepNeg = [];
 		addChildren(this, args);
 	},
 	
@@ -439,6 +437,8 @@ var lookupThrowTarget = function (node) {
 	connect(node, scope.body);
 	return scope.body;
 };
+
+var Anything = new Node(NODE);
 
 var Empty = function () {
 	return new Node(NODE);
@@ -805,6 +805,8 @@ var postDominate = function (a, b) {
 	return 0;
 };
 
+var Unknown = {};
+
 var walk = function (handler, node, visited) {
 	if (!visited) visited = [];
 	if (visited.indexOf(node) >= 0) return;
@@ -818,28 +820,28 @@ var walk = function (handler, node, visited) {
 	}
 };
 
-var _ReachDef = function (ref) {
-	if (ref.type === REFERENCE && !isLHS(ref)) {
-		var node,
-		v,
-		visited = [],
-		pending = [ref];
-		ref.definition = [];
-		
-		if (ref.type === REFERENCE && ref.attr.builtin) {
-			ref.definition.push(ref.attr.value);
-			return;
+var _ReachDef = function (node, ref) {
+	if (ref.definition) {
+		return ref.definition;
+	}
+	
+	var visited = [],
+	pending = [node];
+	ref.definition = [];
+	
+	if (ref.type === REFERENCE && ref.attr.builtin) {
+		ref.definition.push(ref.attr.value);
+		return;
+	}
+	
+	while (pending.length > 0) {
+		node = pending.pop();
+		if (visited.indexOf(node) >= 0) {
+			continue;
 		}
-		
-		while (pending.length > 0) {
-			node = pending.pop();
-			if (visited.indexOf(node) >= 0) {
-				continue;
-			}
-			visited.push(node);
-			if (GetDefinition(node, ref)) {
-				push.apply(pending, node.pred);
-			}
+		visited.push(node);
+		if (GetDefinition(node, ref)) {
+			push.apply(pending, node.pred);
 		}
 	}
 };
@@ -849,21 +851,13 @@ var GetDefinition = function (node, ref) {
 	type = node.type,
 	c = node.children,
 	lhs, rhs;
+	
 	if (ref.type === REFERENCE) {
 		_var = ref.attr;
 		if (type === ASSIGN) {
 			lhs = c[0];
 			if (lhs.type === REFERENCE && lhs.attr === _var) {
 				AddDefinition(ref, c[1]);
-				return 0;
-			}
-		} else if (type === UNARY) {
-			op = node.attr;
-			if (op === 4 ||
-				op === 5 ||
-				op === 9 ||
-				op === 10) {
-				AddDefinition(ref, node);
 				return 0;
 			}
 		} else if (type === FUNC_HEAD) {
@@ -882,7 +876,21 @@ var GetDefinition = function (node, ref) {
 			AddDefinition(ref, rhs);
 			return 0;
 		}
+	} else if (ref.type === MEMBER) {
+		if (type === ASSIGN) {
+			lhs = c[0];
+			if (Equiv(ref, lhs)) {
+				AddDefinition(ref, c[1]);
+				return 0;
+			} else if (HasIntersect(ref, lhs)) {
+				AddDefinition(ref, c[1]);
+			}
+		} else if (type === FUNC_HEAD) {
+			AddDefinition(ref, Anything);
+		}
 	}
+	
+	return 1;
 };
 
 var AddDefinition = function (ref, def) {
@@ -891,8 +899,28 @@ var AddDefinition = function (ref, def) {
 };
 
 var ReachDef = function () {
-	walk(_ReachDef, scope.head);
+	walk(function(node) {
+		if (!isLHS(node)) {
+			if (node.type === MEMBER) {
+				node = ConstProp(node);
+				if (node.type === MEMBER) {
+					_ReachDef(node, node);
+				}
+			} else if (node.type === REFERENCE) {
+				_ReachDef(node, node);
+			}
+		}
+	}, scope.head);
 };
+
+var Equiv = function (a, b) {
+	var type = a.type;
+	if (type === REFERENCE) {
+		
+	}
+};
+
+var HasIntersect = function () {};
 
 var _ControlDep = function (node) {
 	var pdom = node,
@@ -951,13 +979,12 @@ var HasSideEffect = function (node) {
 	}
 };
 
-var Unknown = {};
-
 var getValue = function (node) {
 	var def, newNode;
 	if (node.type === CONSTANT) {
 		return node.attr;
 	} else if (node.type === REFERENCE) {
+		_ReachDef(node, node);
 		def = node.definition;
 		if (def.length === 1 &&
 			def[0].type === CONSTANT) {
@@ -984,42 +1011,39 @@ _numberOperator = opListToTable(["++x", "--x", "x++", "x--", "+x", "-x", "*", "/
 _booleanOperator = opListToTable(["<", ">", "<=", ">=", "==", "!=", "===", "!==", "&&", "||", "instanceof", "in"]);
 
 var ConstProp = function (node) {
-	var a, b, t, def, type, attr, c;
+	var a, b, t, def, type, attr, c, result = null;
 	
 	type = node.type;
 	attr = node.attr;
 	c = node.children;
 	
-	if (type === UNARY) {
-		if (attr !== 6) {
-			a = ConstProp(a);
-			if (a.type === CONSTANT) {
-				return replace(node, UnaryEval[attr](a));
-			}
-			if (!HasSideEffect(a)) {
-				if (attr === 14) {
-					t = ToBoolean(a);
-					if (t !== Unknown) {
-						return replace(node, Constant(!t));
-					}
-				} else if (attr === 7) {
-					return replace(node, Constant(undefined));
-				} else if (attr === 8) {
-					t = TypeInfer(a);
-					if (t === 0) raise("invalid");
-					if ((t & (TYPE_ALL ^ TYPE_NUMBER)) === 0) {
-						return replace(node, Constant("number"));
-					} else if ((t ^ TYPE_STRING) === 0) {
-						return replace(node, Constant("string"));
-					} else if ((t ^ TYPE_BOOLEAN) === 0) {
-						return replace(node, Constant("boolean"));
-					} else if ((t ^ TYPE_UNDEFINED) === 0) {
-						return replace(node, Constant("undefined"));
-					} else if ((t ^ TYPE_FUNCTION) === 0) {
-						return replace(node, Constant("function"));
-					} else if ((t & (TYPE_ALL ^ TYPE_OBJECT ^ TYPE_NULL)) === 0) {
-						return replace(node, Constant("object"));
-					}
+	if (type === UNARY && attr !== 6) {
+		a = ConstProp(c[0]);
+		if (a.type === CONSTANT) {
+			result = Constant(UnaryEval[attr](a));
+		} else if (!HasSideEffect(a)) {
+			if (attr === 14) {
+				t = ToBoolean(a);
+				if (t !== Unknown) {
+					result = Constant(!t);
+				}
+			} else if (attr === 7) {
+				result = Constant(undefined);
+			} else if (attr === 8) {
+				t = TypeInfer(a);
+				if (t === 0) raise("invalid");
+				if ((t & (TYPE_ALL ^ TYPE_NUMBER)) === 0) {
+					result = Constant("number");
+				} else if ((t ^ TYPE_STRING) === 0) {
+					result = Constant("string");
+				} else if ((t ^ TYPE_BOOLEAN) === 0) {
+					result = Constant("boolean");
+				} else if ((t ^ TYPE_UNDEFINED) === 0) {
+					result = Constant("undefined");
+				} else if ((t ^ TYPE_FUNCTION) === 0) {
+					result = Constant("function");
+				} else if ((t & (TYPE_ALL ^ TYPE_OBJECT ^ TYPE_NULL)) === 0) {
+					result = Constant("object");
 				}
 			}
 		}
@@ -1028,16 +1052,42 @@ var ConstProp = function (node) {
 			a = ConstProp(c[0]);
 			b = ConstProp(c[1]);
 			if (a.type === CONSTANT && b.type === CONSTANT) {
-				return replace(node, BinaryEval[attr](a, b));
+				result = Constant(BinaryEval[attr](a, b));
 			}
 		}
 	} else if (type === REFERENCE) {
-		def = node.definition;
-		if (def.length === 1) {
-			return ConstProp(def[0]);
+		if (!isLHS(node)) {
+			_ReachDef(node, node);
+			def = node.definition;
+			if (def.length === 1) {
+				return ConstProp(def[0]);
+			}
 		}
+	} else if (type === MEMBER) {
+		if (!isLHS(node)) {
+			a = ConstProp(c[0]);
+			b = ConstProp(c[1]);
+			if (b.type === CONSTANT) {
+				if (a.type === CONSTANT || a.type === NATIVE || a.type === NATIVE_FUNC) {
+					result = Native(a.attr[b.attr]));
+				} else if (a.type === FUNC_REF) {
+					if (b.attr === "name") {
+						result = Constant(a.attr.name));
+					} else if (b.attr === "length") {
+						result = Constant(a.attr.params.length);
+					}
+				}
+			}
+		}
+	} else if (type === ASSIGN) {
+		return ConstProp(c[1]);
 	}
-	return node;
+	
+	if (result) {
+		return replace(node, result);
+	} else {
+		return node;
+	}
 };
 
 var TypeInfer = function (node, noCache) {
@@ -1139,6 +1189,8 @@ var TypeInfer = function (node, noCache) {
 		t = TYPE_FUNCTION;
 	} else if (type === RETURN) {
 		return;
+	} else if (type === NODE) {
+		t = TYPE_ALL;
 	} else {
 		return;
 	}
@@ -1154,10 +1206,6 @@ var TypeInfer = function (node, noCache) {
 		}
 	}
 	return t;
-};
-
-var EffectsAnalyse = function () {
-	
 };
 
 var Analyse = function ($node, visited, lhs) {
@@ -1178,8 +1226,8 @@ var Analyse = function ($node, visited, lhs) {
 	} else if (type === REFERENCE && !lhs) {
 		c = node.definition;
 	} else if (type === ASSIGN) {
-		analyse(node.children[0], visited, true);
-		analyse(node.children[1], visited);
+		Analyse(node.children[0], visited, true);
+		Analyse(node.children[1], visited);
 	} else {
 		c = node.children;
 	}
@@ -1187,7 +1235,7 @@ var Analyse = function ($node, visited, lhs) {
 	if (c) {
 		l = c.length;
 		for (i = 0; i<l; i++) {
-			analyse(c[i], visited);
+			Analyse(c[i], visited);
 		}
 	}
 	
@@ -1195,7 +1243,7 @@ var Analyse = function ($node, visited, lhs) {
 	l = c.length;
 	for (i = 0; i<l; i++) {
 		n = c[i];
-		analyse(n, visited);
+		Analyse(n, visited);
 	}
 };
 
