@@ -88,6 +88,7 @@ var FuncBase = extend(Scope, {
 	nodeIdMap: null,
 	nodeList: null,
 	initValues: null,
+	
 	head: null,
 	body: null,
 	params: null,
@@ -96,6 +97,8 @@ var FuncBase = extend(Scope, {
 	inferredName: "",
 	
 	callers: null,
+	
+	Anything: null,
 	
 	__init__: function () {
 		if (scope) {
@@ -110,6 +113,7 @@ var FuncBase = extend(Scope, {
 		this.nodeList = [];
 		this.initValues = [];
 		this.callers = [];
+		this.Anything = new Node(NODE);
 	},
 	
 	setBody: function (body) {
@@ -437,8 +441,6 @@ var lookupThrowTarget = function (node) {
 	connect(node, scope.body);
 	return scope.body;
 };
-
-var Anything = new Node(NODE);
 
 var Empty = function () {
 	return new Node(NODE);
@@ -882,11 +884,11 @@ var GetDefinition = function (node, ref) {
 			if (Equiv(ref, lhs)) {
 				AddDefinition(ref, c[1]);
 				return 0;
-			} else if (HasIntersect(ref, lhs)) {
+			} else if (HasIntersection(ref, lhs)) {
 				AddDefinition(ref, c[1]);
 			}
 		} else if (type === FUNC_HEAD) {
-			AddDefinition(ref, Anything);
+			AddDefinition(ref, scope.Anything);
 		}
 	}
 	
@@ -915,12 +917,17 @@ var ReachDef = function () {
 
 var Equiv = function (a, b) {
 	var type = a.type;
-	if (type === REFERENCE) {
-		
+	if (type === b.type) {
+		if (type === CONSTANT) {
+			return a.attr === b.attr ||
+				isNaN(a.attr) && isNaN(b.attr);
+		} else if (type === UNARY) {
+			
+		}
 	}
 };
 
-var HasIntersect = function () {};
+var HasIntersection = function () {};
 
 var _ControlDep = function (node) {
 	var pdom = node,
@@ -1011,7 +1018,7 @@ _numberOperator = opListToTable(["++x", "--x", "x++", "x--", "+x", "-x", "*", "/
 _booleanOperator = opListToTable(["<", ">", "<=", ">=", "==", "!=", "===", "!==", "&&", "||", "instanceof", "in"]);
 
 var ConstProp = function (node) {
-	var a, b, t, def, type, attr, c, result = null;
+	var a, b, bv, t, def, type, attr, c, result = null;
 	
 	type = node.type;
 	attr = node.attr;
@@ -1020,7 +1027,7 @@ var ConstProp = function (node) {
 	if (type === UNARY && attr !== 6) {
 		a = ConstProp(c[0]);
 		if (a.type === CONSTANT) {
-			result = Constant(UnaryEval[attr](a));
+			result = Constant(UnaryEval[attr](a.attr));
 		} else if (!HasSideEffect(a)) {
 			if (attr === 14) {
 				t = ToBoolean(a);
@@ -1052,7 +1059,7 @@ var ConstProp = function (node) {
 			a = ConstProp(c[0]);
 			b = ConstProp(c[1]);
 			if (a.type === CONSTANT && b.type === CONSTANT) {
-				result = Constant(BinaryEval[attr](a, b));
+				result = Constant(BinaryEval[attr](a.attr, b.attr));
 			}
 		}
 	} else if (type === REFERENCE) {
@@ -1068,13 +1075,28 @@ var ConstProp = function (node) {
 			a = ConstProp(c[0]);
 			b = ConstProp(c[1]);
 			if (b.type === CONSTANT) {
+				bv = b.attr;
 				if (a.type === CONSTANT || a.type === NATIVE || a.type === NATIVE_FUNC) {
-					result = Native(a.attr[b.attr]));
+					result = Native(a.attr[bv]);
 				} else if (a.type === FUNC_REF) {
-					if (b.attr === "name") {
-						result = Constant(a.attr.name));
-					} else if (b.attr === "length") {
+					if (bv === "name") {
+						result = Constant(a.attr.name);
+					} else if (bv === "length") {
 						result = Constant(a.attr.params.length);
+					}
+				} else {
+					t = TypeInfer(a);
+					if (t === 0) raise("invalid");
+					if ((t & (TYPE_ALL ^ TYPE_NUMBER)) === 0) {
+						result = Native((0)[bv]);
+					} else if ((t ^ TYPE_STRING) === 0) {
+						if (bv !== "length" && "" + ~~bv !== "" + bv) {
+							result = Native(""[bv]);
+						}
+					} else if ((t ^ TYPE_BOOLEAN) === 0) {
+						result = Native(false[bv]);
+					} else if ((t & (TYPE_ALL ^ TYPE_UNDEFINED ^ TYPE_NULL)) === 0) {
+						raise("Cannot read property of undefined/null");
 					}
 				}
 			}
