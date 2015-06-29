@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>analyzer.js</title>
+<script src="base.js"></script>
+<script src="ident.js"></script>
+<script src="analyzer2.js"></script>
+<script src="parser2.js"></script>
+<script>
+var parserTests = [
+"foo: while (a) break foo;",
+"if (b? c: d) { x += 1; o = { a: 2 } }",
+"foo: bar: a;",
+"2.34 + new a / ++x",
+"function foo() { return \"abc\r\n\"; }"
+],
+parserResults,
+cfgResults;
+
+var parserTest = function () {
+    parserResults = parserTests.map(Parse);
+};
+
+var cfgTest = function () {
+    if (!parserResults) {
+        parserTest();
+    }
+    cfgResults = parserResults.map(CFG);
+};
+
+var displayCFG = function (func) {
+    console.log(func.name || "[anon]");
+    displayBlock(func.entry, 0, {});
+    console.log("\n");
+    var funcs = func.funcs, i;
+    for (i = 0; i<funcs.length; i++) {
+        displayCFG(funcs[i]);
+    }
+};
+
+var displayBlock = function (block, id, visited) {
+    var myId = block.id;
+    if (myId > id && !visited[myId]) {
+        visited[myId] = 1;
+        var succ = block.succ, i, s;
+        for (i = 0; i<succ.length; i++) {
+            s = succ[i];
+            console.log("\t", myId, " => ", s.id);
+            displayBlock(s, myId);
+        }
+    }
+};
+</script>
+</head>
+<body>
+</body>
+</html>

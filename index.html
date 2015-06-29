@@ -9,23 +9,23 @@
 <script>
 
 var $label = function (labels, node) {
-	if (!(labels instanceof Array)) {
-		labels = [labels];
-	}
-	node.labels = labels;
-	return node;
+    if (!(labels instanceof Array)) {
+        labels = [labels];
+    }
+    node.labels = labels;
+    return node;
 };
 
-var program = parser("foo:{while(a){if (b) break foo; else x++;} x++;}");
+var program = parser.parse("x = 1; if (b) { x = 2; y = x; } else { alert(x); }");
 
 var run = function () {
-	saveScope(program);
-	program.cfg();
-	ReachDef();
-	
-	computeDominators();
-	computePostDominators();
-	ControlDep();
+    saveScope(program);
+    program.cfg();
+    
+    computeDominators();
+    computePostDominators();
+    ControlDep();
+    ReachDef();
 };
 </script>
 </head>
