@@ -123,6 +123,10 @@ var BasicBlock = extend(Object, {
         }
     },
     
+    last: function () {
+        return this.nodes[this.nodes.length - 1];
+    },
+    
     toString: function () {
         return "BasicBlock(" + this.id + ")\n\t" +
             this.nodes.join("\n\t");
@@ -168,6 +172,10 @@ var Variable = extend(Object, {
         this.id = ++Variable.idCounter;
         Variable.varMap[this.id] = this;
         this.scope = scope;
+    },
+    
+    toString: function () {
+        return "var(" + this.id + (this.name? ", " + this.name: "") + ")";
     }
 });
 
@@ -793,10 +801,10 @@ function Match(a1, a2, binding) {
         if (x.isVar) {
             id = x.id;
             v = binding[id];
-            if (typeof v === "number") {
-                return matchVar(val, v, 1);
-            } else if (v && v.isVar) {
+            if (v && v.isVar) {
                 return matchVar(val, v, s);
+            } else if (v !== undefined) {
+                return matchVar(val, v, 1);
             } else if (s === 0) {
                 return matchVar(val, x, 2);
             } else {
@@ -842,10 +850,10 @@ function Match(a1, a2, binding) {
 function Unwrap(x, binding) {
     if (x.isVar) {
         var v = binding[x.id];
-        if (typeof v === "number") {
-            return v;
-        } else if (v && v.isVar) {
+        if (v && v.isVar) {
             return Unwrap(v, binding);
+        } else if (v !== undefined) {
+            return v;
         } else {
             return x;
         }
@@ -866,19 +874,19 @@ var Predicate = extend(PredicateBase, {
     db: null,
     rules: null,
     dependedBy: null,
-    hasNew: 0,
+    newRows: null,
     
     __init__: function () {
         this.db = [];
         this.rules = [];
         this.dependedBy = [];
-        this.hasNew = 0;
+        this.newRows = [];
     },
     
     assert: function (args) {
         if (!this.has(args, {})) {
             this.db.push(args);
-            this.hasNew = 1;
+            this.newRows.push(args);
         }
     },
     
@@ -893,12 +901,12 @@ var Predicate = extend(PredicateBase, {
         return 0;
     },
     
-    query: function (args, binding, cb) {
+    query: function (args, binding, cb, x) {
         var db = this.db, i, row, b;
         for (i = 0; i<db.length; i++) {
             row = db[i];
             if (b = Match(row, args, binding)) {
-                cb(b);
+                cb(b, x);
             }
         }
     },
@@ -918,10 +926,22 @@ var Predicate = extend(PredicateBase, {
         this.rules.push(new Rule(this, head, slice.call(arguments, 1)));
     },
     
-    refresh: function () {
+    refresh: function (rows) {
         var dep = this.dependedBy, i;
         for (i = 0; i<dep.length; i++) {
-            dep[i].refresh();
+            dep[i].refresh(this, rows);
+        }
+    },
+    
+    beginUpdate: function () {
+        this.newRows.length = 0;
+    },
+    
+    endUpdate: function () {
+        rows = this.newRows;
+        if (rows.length > 0) {
+            this.newRows = [];
+            this.refresh(rows);
         }
     }
 });
@@ -937,9 +957,9 @@ var Not = extend(PredicateBase, {
         return !this.predicate.has(args, binding);
     },
     
-    query: function (args, binding, cb) {
+    query: function (args, binding, cb, x) {
         if (!this.predicate.has(args, binding)) {
-            cb(binding);
+            cb(binding, x);
         }
     },
     
@@ -953,14 +973,14 @@ var Rule = extend(Object, {
     head: null,
     body: null,
     dependencies: null,
-    cb: null,
+    _cb: null,
     
     __init__: function (predicate, head, body) {
         this.predicate = predicate;
         this.head = head;
         this.body = body;
         this.dependencies = [];
-        this.cb = [];
+        this._cb = [];
         
         var i, atom, pred, l = body.length;
         for (i = 0; i<l; i++) {
@@ -968,28 +988,48 @@ var Rule = extend(Object, {
             pred = atom.shift();
             pred.dependedBy.push(this);
             this.dependencies.push(pred);
-            if (i === l - 1) {
-                this.cb.push(function (binding) {
-                    predicate.assert(Subst(head, binding));
-                });
-            } else {
-                this.cb.push(function (rule, i) {
-                    return function (binding) {
-                        rule.dependencies[i].query(rule.body[i], binding, rule.cb[i]);
-                    }
-                }(this, i + 1));
-            }
         }
     },
     
-    refresh: function () {
-        var pred = this.predicate;
-        pred.hasNew = 0;
-        this.dependencies[0].query(this.body[0], {}, this.cb[0]);
-        if (pred.hasNew) {
-            pred.hasNew = 0;
-            pred.refresh();
+    refresh: function (pred, rows) {
+        var i, j, body, binding, cb;
+        
+        j = this.dependencies.indexOf(pred);
+        body = this.body[j];
+        binding = {};
+        cb = 0;
+        
+        for (i = 0; i<rows.length; i++) {
+            if (b = Match(rows[i], body, binding)) {
+                if (!cb) {
+                    cb = this._cb[j] || this.cb(j);
+                }
+                cb(b, 0);
+            }
         }
+        
+        this.predicate.endUpdate();
+    },
+    
+    cb: function (j) {
+        var dep = this.dependencies,
+        pred = this.predicate,
+        head = this.head,
+        body = this.body;
+        
+        function cb(binding, i) {
+            if (i === j) {
+                i++;
+            }
+            if (i >= dep.length) {
+                pred.assert(Subst(head, binding));
+            } else {
+                dep[i].query(body[i], binding, cb, i + 1);
+            }
+        }
+        
+        this._cb[j] = cb;
+        return cb;
     }
 });
 
@@ -1010,81 +1050,80 @@ var PredScope = function () {
     };
 };
 
-var Ground = function () {
-    var i;
-    for (i = 0; i<arguments.length; i++) {
-        if (typeof arguments[i] !== "number") {
-            return 0;
-        }
-    }
-    return 1;
-};
-
-var GetNode = function (f, n) {
-    return FuncBase.funcMap[f].nodeMap[n];
-};
-
 var $;
 
 var $Assignment = new Predicate();
 
 var $ReachDef = new Predicate();
 
-var $Next = Functor(function (args, binding, cb) {
-    var f = Unwrap(args[0], binding),
-    n = Unwrap(args[1], binding);
-    var id = args[2].id, node, block, i, succ, j, next;
-    if (Ground(f, n)) {
-        node = GetNode(f, n);
+var $Next = Functor(function (args, binding, cb, x) {
+    var node = Unwrap(args[0], binding),
+    block, succ, i;
+    
+    if (node) {
         block = node.block;
         i = block.nodes.indexOf(node);
         if (i === block.nodes.length - 1) {
             succ = block.succ;
             binding = Object.create(binding);
             for (j = 0; j<succ.length; j++) {
-                next = succ[j].nodes[0];
-                if (next) {
-                    binding[id] = next.id;
-                    cb(binding);
+                if (binding[id] = succ[j].nodes[0]) {
+                    cb(binding, x);
                 }
             }
         } else {
-            binding[id] = block.nodes[i + 1].id;
-            cb(binding);
+            binding[id] = block.nodes[i + 1];
+            cb(binding, x);
+        }
+    } else {
+        node = Unwrap(args[1], binding);
+        if (node) {
+            block = node.block;
+            i = block.nodes.indexOf(node);
+            if (i === 0) {
+                succ = block.pred;
+                binding = Object.create(binding);
+                for (j = 0; j<succ.length; j++) {
+                    if (binding[id] = succ[j].last()) {
+                        cb(binding, x);
+                    }
+                }
+            } else {
+                binding[id] = block.nodes[i - 1];
+                cb(binding, x);
+            }
         }
     }
 });
 
-var $NoKill = Functor(function (args, binding, cb) {
-    var f = Unwrap(args[0], binding),
-    n = Unwrap(args[1], binding),
-    v = Unwrap(args[2], binding);
-    var node, t;
-    if (Ground(f, n, v)) {
-        node = GetNode(f, n);
+var $NoKill = Functor(function (args, binding, cb, x) {
+    var node = Unwrap(args[0], binding),
+    v = Unwrap(args[1], binding), t;
+    if (node && v) {
         t = node.type;
-        if ((t !== ASSIGN || node.value.id !== v) &&
+        if ((t !== ASSIGN || node.value !== v) &&
             t !== NEW && t !== CALL) {
-            cb(binding);
+            cb(binding, x);
         }
     }
 });
 
 $ = PredScope();
-$ReachDef.rule([$("F1"), $("N1"), $("F1"), $("N2"), $("V")],
-    [$Assignment, $("F1"), $("N1"), $("V")],
-    [$Next, $("F1"), $("N1"), $("N2")]);
-$ReachDef.rule([$("F1"), $("N1"), $("F2"), $("N2"), $("V")],
-    [$ReachDef, $("F1"), $("N1"), $("F2"), $("N3"), $("V")],
-    [$NoKill, $("F2"), $("N3"), $("V")],
-    [$Next, $("F2"), $("N3"), $("N2")]);
+$ReachDef.rule([$("N1"), $("N2"), $("V")],
+    [$Assignment, $("N1"), $("V")],
+    [$Next, $("N1"), $("N2")]);
+$ReachDef.rule([$("N1"), $("N2"), $("V")],
+    [$ReachDef, $("N1"), $("N3"), $("V")],
+    [$NoKill, $("N3"), $("V")],
+    [$Next, $("N3"), $("N2")]);
 
 var Analyze = function (func) {
-    var fid = func.id, map = func.nodeMap, node;
+    var map = func.nodeMap, node;
     for (id in map) {
         node = map[id];
         if (node.type === ASSIGN) {
-            $Assignment.assert([fid, +id, node.value.id]);
+            $Assignment.assert([node, node.value]);
+            $Assignment.endUpdate();
         }
     }
 };

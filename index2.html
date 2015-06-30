@@ -66,7 +66,6 @@ var testPredicate2 = function () {
     ast = Parse("x = 1; if (a) a; else b; c;");
     program = CFG(ast);
     Analyze(program);
-    $ReachDef.rules[0].refresh();
 };
 </script>
 </head>
