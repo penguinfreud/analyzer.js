@@ -140,7 +140,7 @@ var Node = extend(Object, {
     
     __init__: function () {
         this.id = ++scope.nodeCounter;
-        scope.nodes[this.id] = this;
+        scope.nodeMap[this.id] = this;
     },
     
     toString: function () {
@@ -166,10 +166,12 @@ var Variable = extend(Object, {
     
     __init__: function () {
         this.id = ++Variable.idCounter;
+        Variable.varMap[this.id] = this;
         this.scope = scope;
     }
 });
 
+Variable.varMap = {};
 Variable.idCounter = 0;
 
 var Scope = extend(Object, {
@@ -269,14 +271,16 @@ var AbstractScope = extend(Scope, {
 });
 
 var FuncBase = extend(Scope, {
+    id: 0,
+    
     ast: null,
     
     entry: null,
     exit: null,
     blockCounter: 0,
     nodeCounter: 0,
-    blocks: null,
-    nodes: [],
+    blockMap: null,
+    nodeMap: null,
     
     funcs: null,
     params: null,
@@ -287,10 +291,12 @@ var FuncBase = extend(Scope, {
         }
         new AbstractScope();
         __super__(Scope, this);
+        this.id = ++FuncBase.idCounter;
+        FuncBase.funcMap[this.id] = this;
         this.blockCounter = 0;
         this.nodeCounter = 0;
-        this.blocks = [];
-        this.nodes = [];
+        this.blockMap = [];
+        this.nodeMap = [];
         this.funcs = [];
         this.params = [];
         this.entry = new BasicBlock();
@@ -312,6 +318,9 @@ var FuncBase = extend(Scope, {
     }
 });
 
+FuncBase.idCounter = 0;
+FuncBase.funcMap = {};
+
 var Func = extend(FuncBase);
 var Program = extend(FuncBase);
 
@@ -324,7 +333,7 @@ var CFG = (function () {
             block = pending.shift();
             if (block.id === 0) {
                 block.id = ++scope.blockCounter;
-                scope.blocks[block.id] = block;
+                scope.blockMap[block.id] = block;
                 push.apply(pending, block.succ);
             }
         }
@@ -378,7 +387,7 @@ var CFG = (function () {
         list, succ, old, body, catchBlock, finallyBlock,
         cond, sequent, alternate, iterator, init, obj,
         target, label, v, ref, func, node, res, type,
-        lhs, rhs, prop, decl, op;
+        lhs, rhs, prop, decl, op, a, b, c;
         if (t === IDENTITY) {
             return ast.node;
         } else if (t === AST_PROGRAM || t === AST_FUNC) {
@@ -430,10 +439,17 @@ var CFG = (function () {
             old = block;
             block = block.newBlock(blockType);
             sequent = check(block) && walk(ast.sequent);
+            if (t === CONDITION) {
+                v = scope.localVar();
+                block.node(ASSIGN, v, sequent);
+            }
             block.connect(succ);
             if (ast.alternate) {
                 block = old.newBlock(blockType);
                 alternate = check(block) && walk(ast.alternate);
+                if (t === CONDITION) {
+                    block.node(ASSIGN, v, alternate);
+                }
                 block.connect(succ);
             } else {
                 old.connect(succ);
@@ -442,7 +458,7 @@ var CFG = (function () {
             stack.pop();
             check(succ);
             if (t === CONDITION) {
-                return succ.node(CONDITION, null, cond, sequent, alternate);
+                return block.node(REFERENCE, v);
             }
         } else if (t === AST_WHILE || t === AST_FOR_LOOP) {
             if (t === AST_FOR_LOOP) {
@@ -583,9 +599,53 @@ var CFG = (function () {
         } else if (t === MEMBER) {
             return block.node(MEMBER, null, walk(ast.obj), walk(ast.prop));
         } else if (t === UNARY) {
+            op = ast.operator;
+            if (op === 4 || op === 5 || op === 9 || op === 10) {
+                lhs = ast.operand;
+                a = op === 4 || op === 9? 18: 19;
+                if (lhs.type === REFERENCE) {
+                    obj = walk(lhs);
+                    if (op <= 5) {
+                        v = scope.localVar();
+                        block.node(ASSIGN, v, obj);
+                    }
+                    rhs = block.node(BINARY, a, obj, block.node(CONSTANT, 1));
+                    walk({ type: ASSIGN, lhs: lhs, rhs: { type: IDENTITY, node: rhs } });
+                } else if (lhs.type === MEMBER) {
+                    obj = walk(lhs.obj);
+                    prop = walk(lhs.prop);
+                    lhs = block.node(MEMBER, null, obj, prop);
+                    if (op <= 5) {
+                        v = scope.localVar();
+                        block.node(ASSIGN, v, lhs);
+                    }
+                    rhs = block.node(BINARY, op, lhs, walk(ast.rhs));
+                    block.node(MEMBER_ASSIGN, null, obj, prop, rhs);
+                } else {
+                    raise("Invalid LHS");
+                }
+                return op <= 5? block.node(REFERENCE, v): rhs;
+            }
             return block.node(UNARY, ast.operator, walk(ast.operand));
         } else if (t === BINARY) {
-            return block.node(BINARY, ast.operator, walk(ast.first), walk(ast.second));
+            op = ast.operator;
+            if (op === 36 || op === 37) {
+                v = scope.localVar();
+                cond = walk(ast.first);
+                block.node(ASSIGN, v, cond);
+                if (op === 37) {
+                    cond = block.node(UNARY, 14, obj);
+                }
+                block.node(BRANCH, null, cond);
+                old = block;
+                sequent = block = block.newBlock(blockType);
+                sequent.node(ASSIGN, v, walk(ast.second));
+                succ = block = sequent.newBlock(blockType);
+                old.connect(succ);
+                return succ.node(REFERENCE, v);
+            } else {
+                return block.node(BINARY, op, walk(ast.first), walk(ast.second));
+            }
         } else if (t === ASSIGN) {
             type = ast.lhs.type;
             if (type === REFERENCE) {
@@ -598,19 +658,25 @@ var CFG = (function () {
             } else if (type === MEMBER) {
                 return block.node(MEMBER_ASSIGN, null,
                     walk(ast.lhs.obj), walk(ast.lhs.prop), walk(ast.rhs));
+            } else {
+                raise("Invalid LHS");
             }
         } else if (t === COMPOUND_ASSIGN) {
             lhs = ast.lhs;
             op = assignOperatorTable[ast.operator];
             if (lhs.type === REFERENCE) {
                 rhs = block.node(BINARY, op, walk(lhs), walk(ast.rhs));
-                return walk({ type: ASSIGN, lhs: lhs, rhs: { type: IDENTITY, node: rhs } });
+                walk({ type: ASSIGN, lhs: lhs, rhs: { type: IDENTITY, node: rhs } });
+                return rhs;
             } else if (lhs.type === MEMBER) {
                 obj = walk(lhs.obj);
                 prop = walk(lhs.prop);
                 rhs = block.node(MEMBER, null, obj, prop);
                 rhs = block.node(BINARY, op, rhs, walk(ast.rhs));
-                return block.node(MEMBER_ASSIGN, null, obj, prop, rhs);
+                block.node(MEMBER_ASSIGN, null, obj, prop, rhs);
+                return rhs;
+            } else {
+                raise("Invalid LHS");
             }
         } else if (t === EXPR_LIST) {
             list = ast.list;
@@ -674,3 +740,351 @@ var CFG = (function () {
     
     return walk;
 })();
+
+function HashString(str) {
+    var h = 0, i;
+    for (i = 0; i < str.length - 1;) {
+        h += (str.charCodeAt(i++) << 16);
+        h += str.charCodeAt(i++);
+        h += (h << 10);
+        h ^= (h >> 6);
+    }
+    h += (h << 3);
+    h ^= (h >> 11);
+    h += (h << 15);
+    return h;
+}
+
+function HashArray(arr) {
+    var h = 0, i;
+    for (i = 0; i < arr.length - 1;) {
+        h += arr[i];
+        h += (h << 10);
+        h ^= (h >> 6);
+    }
+    h += (h << 3);
+    h ^= (h >> 11);
+    h += (h << 15);
+    return h;
+}
+
+var _ = {};
+
+var Var = extend(Object, {
+    id: 0,
+    isVar: 1,
+    
+    __init__: function () {
+        this.id = ++Var.idCounter;
+    }
+});
+
+Var.idCounter = 0;
+
+var PredicateBase = extend(Object, {
+    has: _void,
+    query: _void,
+    queryAll: _void
+});
+
+function Match(a1, a2, binding) {
+    function matchVar(x, val, s) {
+        var id, v, id2, v2;
+        if (x.isVar) {
+            id = x.id;
+            v = binding[id];
+            if (typeof v === "number") {
+                return matchVar(val, v, 1);
+            } else if (v && v.isVar) {
+                return matchVar(val, v, s);
+            } else if (s === 0) {
+                return matchVar(val, x, 2);
+            } else {
+                bind(id, val);
+                return 1;
+            }
+        } else if (s === 0) {
+            return matchVar(val, x, 1);
+        } else if (s === 1) {
+            return x === val;
+        } else {
+            bind(val.id, x);
+            return 1;
+        }
+    };
+    
+    function bind(id, val) {
+        if (f) {
+            f = 0;
+            binding = Object.create(binding);
+        }
+        binding[id] = val;
+    }
+    
+    var i, b1, b2, f = 1, l = a1.length;
+    
+    if (a2.length !== l) {
+        return 0;
+    }
+    for (i = 0; i<l; i++) {
+        b1 = a1[i];
+        b2 = a2[i];
+        if (b1 === _ || b2 === _ || b1 === b2) {
+            continue;
+        }
+        if (!matchVar(b1, b2, 0)) {
+            return 0;
+        }
+    }
+    return binding;
+}
+
+function Unwrap(x, binding) {
+    if (x.isVar) {
+        var v = binding[x.id];
+        if (typeof v === "number") {
+            return v;
+        } else if (v && v.isVar) {
+            return Unwrap(v, binding);
+        } else {
+            return x;
+        }
+    } else {
+        return x;
+    }
+}
+
+function Subst(args, binding) {
+    var i, res = [];
+    for (i = 0; i<args.length; i++) {
+        res[i] = Unwrap(args[i], binding);
+    }
+    return res;
+}
+
+var Predicate = extend(PredicateBase, {
+    db: null,
+    rules: null,
+    dependedBy: null,
+    hasNew: 0,
+    
+    __init__: function () {
+        this.db = [];
+        this.rules = [];
+        this.dependedBy = [];
+        this.hasNew = 0;
+    },
+    
+    assert: function (args) {
+        if (!this.has(args, {})) {
+            this.db.push(args);
+            this.hasNew = 1;
+        }
+    },
+    
+    has: function (args, binding) {
+        var db = this.db, i, row;
+        for (i = 0; i<db.length; i++) {
+            row = db[i];
+            if (Match(row, args, binding)) {
+                return 1;
+            }
+        }
+        return 0;
+    },
+    
+    query: function (args, binding, cb) {
+        var db = this.db, i, row, b;
+        for (i = 0; i<db.length; i++) {
+            row = db[i];
+            if (b = Match(row, args, binding)) {
+                cb(b);
+            }
+        }
+    },
+    
+    queryAll: function (args, binding) {
+        var db = this.db, i, row, result = [];
+        for (i = 0; i<db.length; i++) {
+            row = db[i];
+            if (b = Match(row, args, binding)) {
+                result.push([row, b]);
+            }
+        }
+        return result;
+    },
+    
+    rule: function (head) {
+        this.rules.push(new Rule(this, head, slice.call(arguments, 1)));
+    },
+    
+    refresh: function () {
+        var dep = this.dependedBy, i;
+        for (i = 0; i<dep.length; i++) {
+            dep[i].refresh();
+        }
+    }
+});
+
+var Not = extend(PredicateBase, {
+    predicate: null,
+    
+    __init__: function (predicate) {
+        this.predicate = predicate;
+    },
+    
+    has: function (args, binding) {
+        return !this.predicate.has(args, binding);
+    },
+    
+    query: function (args, binding, cb) {
+        if (!this.predicate.has(args, binding)) {
+            cb(binding);
+        }
+    },
+    
+    queryAll: function () {
+        raise("Impossible");
+    }
+});
+
+var Rule = extend(Object, {
+    predicate: null,
+    head: null,
+    body: null,
+    dependencies: null,
+    cb: null,
+    
+    __init__: function (predicate, head, body) {
+        this.predicate = predicate;
+        this.head = head;
+        this.body = body;
+        this.dependencies = [];
+        this.cb = [];
+        
+        var i, atom, pred, l = body.length;
+        for (i = 0; i<l; i++) {
+            atom = body[i];
+            pred = atom.shift();
+            pred.dependedBy.push(this);
+            this.dependencies.push(pred);
+            if (i === l - 1) {
+                this.cb.push(function (binding) {
+                    predicate.assert(Subst(head, binding));
+                });
+            } else {
+                this.cb.push(function (rule, i) {
+                    return function (binding) {
+                        rule.dependencies[i].query(rule.body[i], binding, rule.cb[i]);
+                    }
+                }(this, i + 1));
+            }
+        }
+    },
+    
+    refresh: function () {
+        var pred = this.predicate;
+        pred.hasNew = 0;
+        this.dependencies[0].query(this.body[0], {}, this.cb[0]);
+        if (pred.hasNew) {
+            pred.hasNew = 0;
+            pred.refresh();
+        }
+    }
+});
+
+var Functor = function (fn) {
+    var p = new Predicate();
+    p.query = fn;
+    return p;
+};
+
+var PredScope = function () {
+    var map = {};
+    return function (name) {
+        if (hasOwnProperty.call(map, name)) {
+            return map[name];
+        } else {
+            return map[name] = new Var();
+        }
+    };
+};
+
+var Ground = function () {
+    var i;
+    for (i = 0; i<arguments.length; i++) {
+        if (typeof arguments[i] !== "number") {
+            return 0;
+        }
+    }
+    return 1;
+};
+
+var GetNode = function (f, n) {
+    return FuncBase.funcMap[f].nodeMap[n];
+};
+
+var $;
+
+var $Assignment = new Predicate();
+
+var $ReachDef = new Predicate();
+
+var $Next = Functor(function (args, binding, cb) {
+    var f = Unwrap(args[0], binding),
+    n = Unwrap(args[1], binding);
+    var id = args[2].id, node, block, i, succ, j, next;
+    if (Ground(f, n)) {
+        node = GetNode(f, n);
+        block = node.block;
+        i = block.nodes.indexOf(node);
+        if (i === block.nodes.length - 1) {
+            succ = block.succ;
+            binding = Object.create(binding);
+            for (j = 0; j<succ.length; j++) {
+                next = succ[j].nodes[0];
+                if (next) {
+                    binding[id] = next.id;
+                    cb(binding);
+                }
+            }
+        } else {
+            binding[id] = block.nodes[i + 1].id;
+            cb(binding);
+        }
+    }
+});
+
+var $NoKill = Functor(function (args, binding, cb) {
+    var f = Unwrap(args[0], binding),
+    n = Unwrap(args[1], binding),
+    v = Unwrap(args[2], binding);
+    var node, t;
+    if (Ground(f, n, v)) {
+        node = GetNode(f, n);
+        t = node.type;
+        if ((t !== ASSIGN || node.value.id !== v) &&
+            t !== NEW && t !== CALL) {
+            cb(binding);
+        }
+    }
+});
+
+$ = PredScope();
+$ReachDef.rule([$("F1"), $("N1"), $("F1"), $("N2"), $("V")],
+    [$Assignment, $("F1"), $("N1"), $("V")],
+    [$Next, $("F1"), $("N1"), $("N2")]);
+$ReachDef.rule([$("F1"), $("N1"), $("F2"), $("N2"), $("V")],
+    [$ReachDef, $("F1"), $("N1"), $("F2"), $("N3"), $("V")],
+    [$NoKill, $("F2"), $("N3"), $("V")],
+    [$Next, $("F2"), $("N3"), $("N2")]);
+
+var Analyze = function (func) {
+    var fid = func.id, map = func.nodeMap, node;
+    for (id in map) {
+        node = map[id];
+        if (node.type === ASSIGN) {
+            $Assignment.assert([fid, +id, node.value.id]);
+        }
+    }
+};

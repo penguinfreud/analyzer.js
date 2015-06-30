@@ -21,7 +21,7 @@ var parserTest = function () {
     parserResults = parserTests.map(Parse);
 };
 
-var cfgTest = function () {
+var testCfg = function () {
     if (!parserResults) {
         parserTest();
     }
@@ -49,6 +49,24 @@ var displayBlock = function (block, id, visited) {
             displayBlock(s, myId);
         }
     }
+};
+
+var testPredicate = function () {
+    var x = new Var(), y = new Var(), z = new Var();
+    var o = {};
+    console.log(Match([x, 1, x], [z, y, 2], o));
+    var o2 = {};
+    o2[x.id] = y;
+    o2[y.id] = z;
+    o2[z.id] = 6;
+    console.log(Subst([3, x], o2));
+};
+
+var testPredicate2 = function () {
+    ast = Parse("x = 1; if (a) a; else b; c;");
+    program = CFG(ast);
+    Analyze(program);
+    $ReachDef.rules[0].refresh();
 };
 </script>
 </head>
