@@ -8,16 +8,17 @@
 <script src="parser2.js"></script>
 <script>
 var parserTests = [
+"x = a + 1 * 3 - x;",
 "foo: while (a) break foo;",
 "if (b? c: d) { x += 1; o = { a: 2 } }",
 "foo: bar: a;",
 "2.34 + new a / ++x",
-"function foo() { return \"abc\r\n\"; }"
+"function foo() { return \"abc\\r\\n\"; }"
 ],
 parserResults,
 cfgResults;
 
-var parserTest = function () {
+var testParser = function () {
     parserResults = parserTests.map(Parse);
 };
 
