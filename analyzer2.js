@@ -330,7 +330,18 @@ FuncBase.idCounter = 0;
 FuncBase.funcMap = {};
 
 var Func = extend(FuncBase);
-var Program = extend(FuncBase);
+var Program = extend(FuncBase, {
+    database: null,
+    
+    __init__: function () {
+        __super__(FuncBase, this);
+        program = this;
+        this.database = [];
+        Predicate.onDbChange();
+    }
+});
+
+var program;
 
 var CFG = (function () {
     var block, stack, unresolved, blockType;
@@ -387,6 +398,15 @@ var CFG = (function () {
         47: 33,
         48: 34,
         49: 35
+    };
+    
+    var assign = function (lhs, rhs) {
+        v = scope.resolveRef(lhs.name);
+        node = block.node(ASSIGN, v || lhs.name, rhs);
+        if (!v) {
+            unresolved.push(node);
+        }
+        return node;
     };
     
     var walk = function(ast) {
@@ -607,33 +627,6 @@ var CFG = (function () {
         } else if (t === MEMBER) {
             return block.node(MEMBER, null, walk(ast.obj), walk(ast.prop));
         } else if (t === UNARY) {
-            op = ast.operator;
-            if (op === 4 || op === 5 || op === 9 || op === 10) {
-                lhs = ast.operand;
-                a = op === 4 || op === 9? 18: 19;
-                if (lhs.type === REFERENCE) {
-                    obj = walk(lhs);
-                    if (op <= 5) {
-                        v = scope.localVar();
-                        block.node(ASSIGN, v, obj);
-                    }
-                    rhs = block.node(BINARY, a, obj, block.node(CONSTANT, 1));
-                    walk({ type: ASSIGN, lhs: lhs, rhs: { type: IDENTITY, node: rhs } });
-                } else if (lhs.type === MEMBER) {
-                    obj = walk(lhs.obj);
-                    prop = walk(lhs.prop);
-                    lhs = block.node(MEMBER, null, obj, prop);
-                    if (op <= 5) {
-                        v = scope.localVar();
-                        block.node(ASSIGN, v, lhs);
-                    }
-                    rhs = block.node(BINARY, op, lhs, walk(ast.rhs));
-                    block.node(MEMBER_ASSIGN, null, obj, prop, rhs);
-                } else {
-                    raise("Invalid LHS");
-                }
-                return op <= 5? block.node(REFERENCE, v): rhs;
-            }
             return block.node(UNARY, ast.operator, walk(ast.operand));
         } else if (t === BINARY) {
             op = ast.operator;
@@ -657,12 +650,7 @@ var CFG = (function () {
         } else if (t === ASSIGN) {
             type = ast.lhs.type;
             if (type === REFERENCE) {
-                v = scope.resolveRef(ast.lhs.name);
-                node = block.node(ASSIGN, v || ast.lhs.name, walk(ast.rhs));
-                if (!v) {
-                    unresolved.push(node);
-                }
-                return node;
+                return assign(ast.lhs, walk(ast.rhs));
             } else if (type === MEMBER) {
                 return block.node(MEMBER_ASSIGN, null,
                     walk(ast.lhs.obj), walk(ast.lhs.prop), walk(ast.rhs));
@@ -674,8 +662,7 @@ var CFG = (function () {
             op = assignOperatorTable[ast.operator];
             if (lhs.type === REFERENCE) {
                 rhs = block.node(BINARY, op, walk(lhs), walk(ast.rhs));
-                walk({ type: ASSIGN, lhs: lhs, rhs: { type: IDENTITY, node: rhs } });
-                return rhs;
+                return assign(lhs, rhs);
             } else if (lhs.type === MEMBER) {
                 obj = walk(lhs.obj);
                 prop = walk(lhs.prop);
@@ -871,29 +858,44 @@ function Subst(args, binding) {
 }
 
 var Predicate = extend(PredicateBase, {
-    db: null,
+    id: 0,
     rules: null,
     dependedBy: null,
     newRows: null,
+    table: null,
     
     __init__: function () {
-        this.db = [];
+        this.id = ++Predicate.idCounter;
+        Predicate.predicates.push(this);
         this.rules = [];
         this.dependedBy = [];
         this.newRows = [];
+        this.table = null;
+    },
+    
+    getTable: function () {
+        if (program) {
+            var tbl;
+            if (!(tbl = program.database[this.id])) {
+                tbl = program.database[this.id] = [];
+            }
+            return tbl;
+        } else {
+            raise("No program");
+        }
     },
     
     assert: function (args) {
         if (!this.has(args, {})) {
-            this.db.push(args);
+            this.table.push(args);
             this.newRows.push(args);
         }
     },
     
     has: function (args, binding) {
-        var db = this.db, i, row;
-        for (i = 0; i<db.length; i++) {
-            row = db[i];
+        var table = this.table, i, row;
+        for (i = 0; i<table.length; i++) {
+            row = table[i];
             if (Match(row, args, binding)) {
                 return 1;
             }
@@ -902,9 +904,9 @@ var Predicate = extend(PredicateBase, {
     },
     
     query: function (args, binding, cb, x) {
-        var db = this.db, i, row, b;
-        for (i = 0; i<db.length; i++) {
-            row = db[i];
+        var table = this.table, i, row, b;
+        for (i = 0; i<table.length; i++) {
+            row = table[i];
             if (b = Match(row, args, binding)) {
                 cb(b, x);
             }
@@ -912,9 +914,9 @@ var Predicate = extend(PredicateBase, {
     },
     
     queryAll: function (args, binding) {
-        var db = this.db, i, row, result = [];
-        for (i = 0; i<db.length; i++) {
-            row = db[i];
+        var table = this.table, i, row, result = [];
+        for (i = 0; i<table.length; i++) {
+            row = table[i];
             if (b = Match(row, args, binding)) {
                 result.push([row, b]);
             }
@@ -945,6 +947,16 @@ var Predicate = extend(PredicateBase, {
         }
     }
 });
+
+Predicate.idCounter = 0;
+Predicate.predicates = [];
+
+Predicate.onDbChange = function () {
+    var list = this.predicates, i;
+    for (i = 0; i<list.length; i++) {
+        list[i].table = program && list[i].getTable();
+    }
+};
 
 var Not = extend(PredicateBase, {
     predicate: null,
@@ -1098,10 +1110,15 @@ var $Next = Functor(function (args, binding, cb, x) {
 
 var $NoKill = Functor(function (args, binding, cb, x) {
     var node = Unwrap(args[0], binding),
-    v = Unwrap(args[1], binding), t;
+    v = Unwrap(args[1], binding), t, value;
     if (node && v) {
         t = node.type;
-        if ((t !== ASSIGN || node.value !== v) &&
+        value = node.value
+        if ((t !== ASSIGN || value !== v) &&
+            (t !== UNARY ||
+                value < 4 || value > 10 || value >= 7 || value <= 8
+                node.operands[0].type !== REFERENCE ||
+                node.operands[0].value !== v)
             t !== NEW && t !== CALL) {
             cb(binding, x);
         }
