@@ -4,8 +4,7 @@ var addType = function (type) {
     return TypeToString.push(type) - 1;
 };
 
-var IDENTITY = addType("identity"),
-CONSTANT = addType("const"),
+var CONSTANT = addType("const"),
 REFERENCE = addType("ref"),
 FUNC_REF = addType("func_ref"),
 NEW = addType("new"),
@@ -67,6 +66,11 @@ var BasicBlock = extend(Object, {
     succ: null,
     open: 1,
     
+    dominator: null,
+    postDominator: null,
+    isLoopHead: 0,
+    isLoopCondition: 0,
+    
     __init__: function (type) {
         this.id = 0;
         this.type = type || BLOCK_NORMAL;
@@ -76,6 +80,11 @@ var BasicBlock = extend(Object, {
         this.pred = [];
         this.succ = [];
         this.open = 1;
+        
+        this.dominator = null;
+        this.postDominator = null;
+        this.isLoopHead = 0;
+        this.isLoopCondition = 0;
     },
     
     add: function (node) {
@@ -294,9 +303,6 @@ var FuncBase = extend(Scope, {
     params: null,
     
     __init__: function () {
-        if (scope && scope.funcs) {
-            scope.funcs.push(this);
-        }
         new AbstractScope();
         __super__(Scope, this);
         this.id = ++FuncBase.idCounter;
@@ -329,7 +335,15 @@ var FuncBase = extend(Scope, {
 FuncBase.idCounter = 0;
 FuncBase.funcMap = {};
 
-var Func = extend(FuncBase);
+var Func = extend(FuncBase, {
+    __init__: function () {
+        if (scope && scope.funcs) {
+            scope.funcs.push(this);
+        }
+        __super__(FuncBase, this);
+    }
+});
+
 var Program = extend(FuncBase, {
     database: null,
     
@@ -346,15 +360,31 @@ var program;
 var CFG = (function () {
     var block, stack, unresolved, blockType;
     
-    var num = function (block) {
-        var pending = [block];
+    var blockCount = 0;
+    
+    var count = function (block) {
+        var pending = [block], visited = [];
         while (pending.length > 0) {
-            block = pending.shift();
-            if (block.id === 0) {
-                block.id = ++scope.blockCounter;
-                scope.blockMap[block.id] = block;
+            block = pending.pop();
+            if (visited.indexOf(block) === -1) {
+                visited.push(block);
+                blockCount++;
                 push.apply(pending, block.succ);
             }
+        }
+    };
+    
+    var num = function (block, visited) {
+        if (visited.indexOf(block) === -1) {
+            visited.push(block);
+            var succ = block.succ, i, l = succ.length;
+            if (l > 0) {
+                for (i = 0; i<l; i++) {
+                    num(succ[i], visited);
+                }
+            }
+            block.id = blockCount--;
+            scope.blockMap[block.id] = block;
         }
     };
     
@@ -401,6 +431,7 @@ var CFG = (function () {
     };
     
     var assign = function (lhs, rhs) {
+        var node;
         v = scope.resolveRef(lhs.name);
         node = block.node(ASSIGN, v || lhs.name, rhs);
         if (!v) {
@@ -413,12 +444,11 @@ var CFG = (function () {
         var t = ast.type, node, i,
         savedStack, savedUnresolved, savedBlockType,
         list, succ, old, body, catchBlock, finallyBlock,
-        cond, sequent, alternate, iterator, init, obj,
+        cond, sequent, alternate, condBlock,
+        iterator, init, obj,
         target, label, v, ref, func, node, res, type,
         lhs, rhs, prop, decl, op, a, b, c;
-        if (t === IDENTITY) {
-            return ast.node;
-        } else if (t === AST_PROGRAM || t === AST_FUNC) {
+        if (t === AST_PROGRAM || t === AST_FUNC) {
             if (t === AST_PROGRAM) {
                 func = new Program();
                 blockType = BLOCK_NORMAL;
@@ -437,7 +467,9 @@ var CFG = (function () {
                 unresolved[i].value = func.resolveRef(unresolved[i].value);
             }
             block.jump(func.exit);
-            num(func.entry);
+            blockCount = 0;
+            count(func.entry);
+            num(func.entry, []);
             func.close();
             stack = savedStack;
             unresolved = savedUnresolved;
@@ -493,31 +525,40 @@ var CFG = (function () {
                 walk(ast.init);
             }
             succ = new BasicBlock(blockType);
-            cond = block = block.jumpNewBlock(blockType);
-            pushStack(ast, succ, cond);
-            cond.node(BRANCH, null, walk(ast.cond));
-            body = block = cond.newBlock();
+            condBlock = block = block.jumpNewBlock(blockType);
+            block.isLoopHead = 1;
+            pushStack(ast, succ, condBlock);
+            cond = walk(ast.cond);
+            block.isLoopCondition = 1;
+            block.node(BRANCH, null, cond);
+            body = block.newBlock();
+            block.connect(succ);
+            block = body;
             check(body) && walk(ast.body);
-            if (t === AST_FOR_LOOP && body.open) {
+            if (t === AST_FOR_LOOP && block.open) {
                 walk(ast.update);
             }
-            body.jump(cond);
-            cond.connect(succ);
+            block.jump(condBlock);
             stack.pop();
             check(succ);
             block = succ;
         } else if (t === AST_DO_WHILE) {
             succ = new BasicBlock(blockType);
-            cond = new BasicBlock(blockType);
-            pushStack(ast, succ, cond);
+            condBlock = new BasicBlock(blockType);
+            pushStack(ast, succ, condBlock);
             body = block = block.jumpNewBlock();
+            block.isLoopHead = 1;
             check(body) && walk(ast.body);
-            block = cond;
-            body.jump(cond);
-            check(cond) && cond.node(BRANCH, null, walk(ast.cond));
+            block.jump(condBlock);
+            block = condBlock;
+            if (check(condBlock)) {
+                cond = walk(ast.cond);
+                block.isLoopCondition = 1;
+                block.node(BRANCH, null, cond);
+                block.connect(body);
+                block.connect(succ);
+            }
             stack.pop();
-            cond.connect(body);
-            cond.connect(succ);
             block = succ;
             check(succ);
         } else if (t === AST_FOR_IN) {
@@ -538,6 +579,7 @@ var CFG = (function () {
             if (block.open) {
                 obj = walk(ast.obj);
                 cond = block.jumpNewBlock(blockType);
+                cond.isLoopHead = cond.isLoopCondition = 1;
                 succ = new BasicBlock();
                 cond.node(FOR_IN_BRANCH, null, obj);
                 pushStack(ast, succ, cond);
@@ -546,7 +588,7 @@ var CFG = (function () {
                     walk({ type: ASSIGN, lhs: iterator, rhs: { type: FOR_IN_INIT, obj: obj } });
                     walk(ast.body);
                 }
-                body.jump(cond);
+                block.jump(cond);
                 cond.connect(succ);
                 check(succ);
                 block = succ;
@@ -735,6 +777,55 @@ var CFG = (function () {
     
     return walk;
 })();
+
+var _commonDom = function (a, b, stack, reverse) {
+    var chain = [];
+    do {
+        chain.push(a);
+        a = getDominator(a, stack, reverse);
+    } while (a);
+    
+    while (b && chain.indexOf(b) === -1) {
+        b = getDominator(b, stack, reverse);
+    }
+    return b;
+};
+
+var getDominator = function (block, stack, reverse) {
+    var preds, i, l, t = null, s;
+    t = reverse? block.postDominator: block.dominator;
+    if (t) return t;
+    preds = reverse? block.succ: block.pred;
+    l = preds.length;
+    if (!reverse && block.isLoopHead) {
+        t = preds[0];
+    } else if (reverse && stack.indexOf(block) >= 0) {
+        return preds[1];
+    } else if (l > 0) {
+        s = 0;
+        if (reverse && l > 1 && block.isLoopCondition) s = 1, stack.push(block);
+        t = preds[0];
+        for (i = 1; i<l; i++) t = _commonDom(t, preds[i], stack, reverse);
+        if (s) stack.pop();
+    }
+    if (reverse) block.postDominator = t;
+    else block.dominator = t;
+    return t;
+};
+
+var computeDominators = function (func) {
+    var list = func.blockMap, i, l = list.length;
+    for (i = 1; i<l; i++) {
+        getDominator(list[i], [], 0);
+    }
+};
+
+var computePostDominators = function (func) {
+    var list = func.blockMap, i = list.length;
+    while (--i) {
+        getDominator(list[i], [], 1);
+    }
+};
 
 function HashString(str) {
     var h = 0, i;
@@ -955,6 +1046,7 @@ Predicate.onDbChange = function () {
     var list = this.predicates, i;
     for (i = 0; i<list.length; i++) {
         list[i].table = program && list[i].getTable();
+        list[i].newRows = [];
     }
 };
 
@@ -985,22 +1077,39 @@ var Rule = extend(Object, {
     head: null,
     body: null,
     dependencies: null,
+    varMap: null,
     _cb: null,
     
     __init__: function (predicate, head, body) {
         this.predicate = predicate;
-        this.head = head;
-        this.body = body;
         this.dependencies = [];
+        this.varMap = {};
         this._cb = [];
+        
+        this.head = this.parse(head);
+        this.body = [];
         
         var i, atom, pred, l = body.length;
         for (i = 0; i<l; i++) {
-            atom = body[i];
-            pred = atom.shift();
+            pred = body[i][0];
+            this.body[i] = this.parse(body[i][1]);
             pred.dependedBy.push(this);
             this.dependencies.push(pred);
         }
+    },
+    
+    parse: function (str) {
+        var parts = str.split(/\s*,\s*/g),
+        args = [], i, name, map = this.varMap;
+        for (i = 0; i<parts.length; i++) {
+            name = parts[i];
+            if (hasOwnProperty.call(map, name)) {
+                args[i] = map[name];
+            } else {
+                args[i] = map[name] = new Var();
+            }
+        }
+        return args;
     },
     
     refresh: function (pred, rows) {
@@ -1070,6 +1179,7 @@ var $ReachDef = new Predicate();
 
 var $Next = Functor(function (args, binding, cb, x) {
     var node = Unwrap(args[0], binding),
+    id = args[1].id,
     block, succ, i;
     
     if (node) {
@@ -1089,6 +1199,7 @@ var $Next = Functor(function (args, binding, cb, x) {
         }
     } else {
         node = Unwrap(args[1], binding);
+        id = args[0].id;
         if (node) {
             block = node.block;
             i = block.nodes.indexOf(node);
@@ -1116,9 +1227,9 @@ var $NoKill = Functor(function (args, binding, cb, x) {
         value = node.value
         if ((t !== ASSIGN || value !== v) &&
             (t !== UNARY ||
-                value < 4 || value > 10 || value >= 7 || value <= 8
+                value < 4 || value > 10 || value >= 7 || value <= 8 ||
                 node.operands[0].type !== REFERENCE ||
-                node.operands[0].value !== v)
+                node.operands[0].value !== v) &&
             t !== NEW && t !== CALL) {
             cb(binding, x);
         }
@@ -1126,13 +1237,13 @@ var $NoKill = Functor(function (args, binding, cb, x) {
 });
 
 $ = PredScope();
-$ReachDef.rule([$("N1"), $("N2"), $("V")],
-    [$Assignment, $("N1"), $("V")],
-    [$Next, $("N1"), $("N2")]);
-$ReachDef.rule([$("N1"), $("N2"), $("V")],
-    [$ReachDef, $("N1"), $("N3"), $("V")],
-    [$NoKill, $("N3"), $("V")],
-    [$Next, $("N3"), $("N2")]);
+$ReachDef.rule("N1, N2, V",
+    [$Assignment, "N1, V"],
+    [$Next, "N1, N2"]);
+$ReachDef.rule("N1, N2, V",
+    [$ReachDef, "N1, N3, V"],
+    [$NoKill, "N3, V"],
+    [$Next, "N3, N2"]);
 
 var Analyze = function (func) {
     var map = func.nodeMap, node;
