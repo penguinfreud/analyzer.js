@@ -62,13 +62,14 @@ var displayBlock = function (block, id, visited) {
 
 var testPredicate = function () {
     var x = new Var(), y = new Var(), z = new Var();
+    var b = {};
     var o = {};
-    console.log(Match([x, 1, x], [z, y, 2], o));
+    console.log(Match([1, 2, 3, 3], [x, y, x, 3], o, b), b);
     var o2 = {};
     o2[x.id] = y;
     o2[y.id] = z;
     o2[z.id] = 6;
-    console.log(Subst([3, x], o2));
+    console.log(Subst([3, x], o2, b));
 };
 
 var testPredicate2 = function () {

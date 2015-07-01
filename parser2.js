@@ -1024,13 +1024,9 @@ function AssignmentExpression(p, noIn) {
 };
 
 function Expression (p, noIn) {
-    var list, pos = p.pos(), expr = AssignmentExpression(p, noIn);
-    if (p.match(44)) {
-        list = [expr];
-        do list.push(AssignmentExpression(p, noIn));
-        while (p.match(44));
-        return p.make(EXPR_LIST, pos, { list: list });
-    } else return expr;
+    var pos = p.pos(), list = [AssignmentExpression(p, noIn)];
+    while (p.match(44)) list.push(AssignmentExpression(p, noIn));
+    return p.make(EXPR_LIST, pos, { list: list });
 }
 
 function Try(p, pos) {

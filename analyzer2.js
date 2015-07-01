@@ -50,7 +50,9 @@ iter = 0;
 var BLOCK_NORMAL = ++iter,
 BLOCK_TRY = ++iter,
 BLOCK_FINALLY = ++iter,
-BLOCK_WITH = ++iter;
+BLOCK_WITH = ++iter,
+BLOCK_EXIT = ++iter,
+BLOCK_ENTRY = ++iter;
 
 var raise = function (msg) {
     throw new Error(msg);
@@ -317,8 +319,8 @@ var FuncBase = extend(Scope, {
         this.nodeMap = [];
         this.funcs = [];
         this.params = [];
-        this.entry = new BasicBlock();
-        this.exit = new BasicBlock();
+        this.entry = new BasicBlock(BLOCK_ENTRY);
+        this.exit = new BasicBlock(BLOCK_EXIT);
     },
     
     close: function () {
@@ -879,69 +881,46 @@ var PredicateBase = extend(Object, {
 
 var _ctor = function () {};
 
+var copy = function (o) {
+    _ctor.prototype = o;
+    return new _ctor;
+};
+
 function MatchVar(x, val, s, binding, newBinding) {
     var id, v, id2, v2;
-    if (x.isVar) {
-        id = x.id;
-        v = binding[id];
-        if (v && v.isVar) {
-            return MatchVar(val, v, s, binding, newBinding);
-        } else if (v !== undefined) {
-            return MatchVar(val, v, 1, binding, newBinding);
-        } else if (s === 0) {
-            return MatchVar(val, x, 2, binding, newBinding);
-        } else {
-            newBinding[id] = val;
-            return 1;
-        }
-    } else if (s === 0) {
-        return MatchVar(val, x, 1, binding, newBinding);
-    } else if (s === 1) {
-        return x === val;
-    } else {
-        newBinding[val.id] = x;
+    if (val.isVar) {
+        if (v = binding[id = val.id]) return x === v;
+        newBinding[id] = x;
         return 1;
     }
+    return 0;
 }
 
-function Match(a1, a2, binding, newBinding) {
+function Match(a1, a2, b, nb) {
     var i, b1, b2, l = a1.length;
-    
-    if (a2.length !== l) {
-        return 0;
-    }
+    if (a2.length !== l) return 0;
     for (i = 0; i<l; i++) {
         b1 = a1[i];
         b2 = a2[i];
-        if (b1 === _ || b2 === _ || b1 === b2) {
-            continue;
-        }
-        if (!MatchVar(b1, b2, 0, binding, newBinding)) {
-            return 0;
-        }
+        if (b1 === _ || b2 === _ || b1 === b2) continue;
+        if (!MatchVar(b1, b2, 0, b, nb)) return 0;
     }
     return 1;
 }
 
-function Unwrap(x, binding) {
+function Unwrap(x, b) {
     if (x.isVar) {
-        var v = binding[x.id];
-        if (v && v.isVar) {
-            return Unwrap(v, binding);
-        } else if (v !== undefined) {
-            return v;
-        } else {
-            return x;
-        }
-    } else {
-        return x;
+        var v = b[x.id];
+        if (v && v.isVar) return Unwrap(v, b);
+        else if (v !== undefined) return v;
     }
+    return x;
 }
 
-function Subst(args, binding) {
+function Subst(args, b) {
     var i, res = [], v, w, map = {};
     for (i = 0; i<args.length; i++) {
-        v = res[i] = Unwrap(args[i], binding);
+        v = res[i] = Unwrap(args[i], b);
         if (v.isVar) {
             w = map[v.id];
             if (!w) w = map[v.id] = new Var();
@@ -974,14 +953,18 @@ var Predicate = extend(PredicateBase, {
         this.generation = 0;
     },
     
+    createTable: function () {
+        return {
+            data: [],
+            hash: []
+        };
+    },
+    
     getTable: function () {
         if (program) {
             var tbl;
             if (!(tbl = program.database[this.id])) {
-                tbl = program.database[this.id] = {
-                    data: [],
-                    hash: []
-                };
+                tbl = program.database[this.id] = this.createTable();
             }
             return tbl;
         } else {
@@ -1010,8 +993,9 @@ var Predicate = extend(PredicateBase, {
     },
     
     assert: function (args) {
-        if (!this.has(args, {})) {
-            var h = this.hash(args),
+        var b = {};
+        if (!this.has(args, b)) {
+            var h = this.hash(args, b),
             u = this.upper(h);
             this.table.data.splice(u, 0, args);
             this.table.hash.splice(u, 0, h);
@@ -1020,7 +1004,7 @@ var Predicate = extend(PredicateBase, {
     },
     
     has: function (args, binding) {
-        var table = this.table.data, h = this.hash(args),
+        var table = this.table.data, h = this.hash(args, binding),
         l = this.lower(h), u = this.upper(h),
         newBinding = {}, i, row;
         for (i = l; i<u; i++) {
@@ -1032,15 +1016,13 @@ var Predicate = extend(PredicateBase, {
         return 0;
     },
     
-    query: function (args, binding, cb, x) {
-        var table = this.table.data, h = this.hash(args),
+    query: function (h, matcher, binding, cb, x) {
+        var table = this.table.data,
         l = this.lower(h), u = this.upper(h),
         i, row, b = Object.create(binding);
         for (i = l; i<u; i++) {
             row = table[i];
-            if (Match(row, args, binding, b)) {
-                cb(b, x);
-            }
+            if (matcher(row, binding, b)) cb(b, x);
         }
     },
     
@@ -1073,6 +1055,7 @@ var Predicate = extend(PredicateBase, {
         this.newRows.length = 0;
     },
     
+    _shouldUpdate: 0,
     endUpdate: function () {
         var rows = this.newRows;
         if (rows.length > 0) {
@@ -1104,9 +1087,15 @@ var $HashFunc = function (keys) {
     var h = keys.join(",");
     if (hasOwnProperty.call(_HashFuncMap, h))
         return _HashFuncMap[h];
-    var code = "if(args[" + keys.join("].isVar||args[") + "].isVar)return 0;" +
-    "return HashArray(args[" + keys.join("].id, args[") + "].id);";
-    return new Function("args", code);
+    var code = ["var "], i, k;
+    for (i = 0; i<keys.length; i++) {
+        k = keys[i];
+        if (i) code.push(",");
+        code.push("c", k, "=Unwrap(a[", k, "],b)");
+    }
+    code.push(";if(c", keys.join(".isVar||c"), ".isVar)return 0;",
+        "return HashArray(c", keys.join(".id, c"), ".id);");
+    return new Function("a,b", code.join(""));
 };
 
 var Not = extend(PredicateBase, {
@@ -1135,6 +1124,8 @@ var Rule = extend(Object, {
     predicate: null,
     head: null,
     body: null,
+    hashFuncs: null,
+    matchers: null,
     dependencies: null,
     depGen: 0,
     varMap: null,
@@ -1149,6 +1140,8 @@ var Rule = extend(Object, {
         
         this.head = this.parse(head);
         this.body = [];
+        this.hashFuncs = [];
+        this.matchers = [];
         
         var i, atom, pred, l = body.length;
         for (i = 0; i<l; i++) {
@@ -1158,6 +1151,8 @@ var Rule = extend(Object, {
             this.dependencies.push(pred);
             this.depGen.push(0);
         }
+        
+        this.compileMatchers();
     },
     
     parse: function (str) {
@@ -1196,41 +1191,115 @@ var Rule = extend(Object, {
     
     cb: function (j) {
         var dep = this.dependencies,
+        l = dep.length,
         pred = this.predicate,
         head = this.head,
-        body = this.body,
+        hashFuncs = this.hashFuncs[j],
+        matchers = this.matchers[j],
         self = this;
         
-        function cb(binding, i) {
-            if (i === j) {
-                i++;
-            }
-            if (i >= dep.length) {
-                pred.assert(Subst(head, binding));
-            } else {
-                dep[i].query(body[i], binding, cb, i + 1);
-            }
+        function cb(b, i) {
+            if (i === j) i++;
+            if (i >= l) pred.assert(Subst(head, b));
+            else dep[i].query(hashFuncs[i](0, b), matchers[i], b, cb, i + 1);
         }
         
         this._cb[j] = cb;
         return cb;
+    },
+    
+    compileMatchers: function () {
+        var _body = this.body, i, j, k, m, l = _body.length,
+        matchers = this.matchers, dep = this.dependencies,
+        hashFuncs = this.hashFuncs,
+        id, code, body, binding, keys, noHash,
+        bound = [], cond = [], bind = [], dup;
+        for (j = 0; j<l; j++) {
+            body = _body[j];
+            binding = {};
+            for (k = 0; k<body.length; k++) {
+                binding[body[k].id] = 1;
+            }
+            matchers[j] = [];
+            hashFuncs[j] = [];
+            for (i = 0; i<l; i++) {
+                if (i === j) continue;
+                body = _body[i];
+                if (dep[i].isFunctor) {
+                    matchers[j][i] = body;
+                    hashFuncs[j][i] = _void;
+                    continue;
+                }
+                bound.length = 0;
+                cond.length = 0;
+                bind.length = 0;
+                dup = {};
+                keys = dep[i].keys;
+                noHash = 0;
+                for (k = 0; k<body.length; k++) {
+                    id = body[k].id;
+                    m = keys.indexOf(k);
+                    if (binding[id] === 1) {
+                        if (m >= 0) bound[m] = id;
+                        cond.push("a[" + k + "]===b[" + id + "]");
+                        continue;
+                    }
+                    if (m >= 0) noHash = 1;
+                    if (typeof dup[id] === "number") {
+                        cond.push("a[" + k + "]===a[" + dup[id] + "]");
+                    } else {
+                        dup[id] = k;
+                        bind.push("c[" + id + "]=a[" + k + "];");
+                    }
+                }
+                for (k = 0; k<body.length; k++) {
+                    binding[body[k].id] = 1;
+                }
+                code = "if(" + cond.join("&&") + "){" +
+                    bind.join("") + "return 1;}return 0;";
+                matchers[j][i] = new Function("a,b,c", code);
+                code = noHash?
+                    "return 0;":
+                    "return HashArray(b[" + bound.join("].id,b[") + "].id);";
+                hashFuncs[j][i] = new Function("a,b", code);
+            }
+        }
     }
 });
 
-var Functor = function (fn) {
-    var p = new Predicate();
-    p.query = fn;
-    return p;
-};
+var Functor = extend(Predicate, {
+    isFunctor: 1,
+    
+    __init__: function (query) {
+        this.id = ++Predicate.idCounter;
+        this.query = query;
+        Predicate.predicates.push(this);
+        this.dependedBy = [];
+        this.table = null;
+    },
+    
+    createTable: function () {
+        return {
+            cache: {},
+            confirm: {}
+        };
+    }
+});
 
 var $Assignment = new Predicate([1]);
 var $Edge = new Predicate([0]);
 
-var $NoKill = Functor(function (args, binding, cb, x) {
+var $NoKill = new Functor(function (_, args, binding, cb, x) {
     var block = Unwrap(args[0], binding),
     v = Unwrap(args[1], binding),
-    nodes, i, node, t, value;
+    h, cache, nodes, i, node, t, value;
     if (block && v) {
+        h = HashArray(block.id, v.id);
+        cache = this.table;
+        if (cache.confirm[h] === block.id) {
+            if (cache.cache[h]) cb(binding, x);
+            return;
+        }
         nodes = block.nodes;
         for (i = 0; i<nodes.length; i++) {
             node = nodes[i];
@@ -1242,9 +1311,12 @@ var $NoKill = Functor(function (args, binding, cb, x) {
                     node.operands[0].type === REFERENCE &&
                     node.operands[0].value === v) ||
                 t === NEW || t === CALL) {
+                cache.confirm[h] = block.id;
                 return;
             }
         }
+        cache.confirm[h] = block.id;
+        cache.cache[h] = 1;
         cb(binding, x);
     }
 });
@@ -1261,26 +1333,59 @@ $ReachDef.rule("D, B1, V",
     [$NoKill, "B2, V"],
     [$Edge, "B2, B1"]);
 
-var Analyze = function (func) {
-    var map, i, block, succ, j, nodes, node, kill;
-    map = func.blockMap;
+var Purge = function (func) {
+    var i, map = func.blockMap, block, b2, succ, pred, j, k, node, l;
     for (i = 1; i<map.length; i++) {
-        block = map[i];
-        succ = block.succ;
-        for (j = 0; j<succ.length; j++) {
-            $Edge.assert([block, succ[j]]);
-        }
-        nodes = block.nodes;
-        j = nodes.length;
-        while (j--) {
-            node = nodes[j];
-            if (node.type === ASSIGN) {
-                if (!$Assignment.has([_, block, node.value])) {
-                    $Assignment.assert([node, block, node.value]);
+        if (block = map[i]) {
+            if (block.succ.length === 1) {
+                b2 = block.succ[0];
+                if (block.nodes.length === 0) {
+                    pred = block.pred;
+                    k = b2.pred.indexOf(block);
+                    b2.pred.splice(k, 1);
+                    push.apply(b2.pred, pred);
+                    for (j = 0; j<pred.length; j++) {
+                        succ = pred[j].succ;
+                        k = succ.indexOf(block);
+                        succ[k] = b2;
+                    }
+                    map[i] = null;
+                } else if (b2.pred.length === 1 && block.type === b2.type) {
+                    push.apply(block.nodes, b2.nodes);
+                    block.succ = b2.succ;
+                    map[b2.id] = null;
                 }
             }
         }
     }
+};
+
+var Analyze = function (func) {
+    var map, i, block, succ, j, nodes, node, kill;
+    Purge(func);
+    map = func.blockMap;
+    for (i = 1; i<map.length; i++) {
+        if (block = map[i]) {
+            succ = block.succ;
+            for (j = 0; j<succ.length; j++) {
+                $Edge.assert([block, succ[j]]);
+            }
+        }
+    }
     $Edge.endUpdate();
+    for (i = 1; i<map.length; i++) {
+        if (block = map[i]) {
+            nodes = block.nodes;
+            j = nodes.length;
+            while (j--) {
+                node = nodes[j];
+                if (node.type === ASSIGN) {
+                    if (!$Assignment.has([_, block, node.value])) {
+                        $Assignment.assert([node, block, node.value]);
+                    }
+                }
+            }
+        }
+    }
     $Assignment.endUpdate();
 };
