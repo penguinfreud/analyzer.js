@@ -7,6 +7,7 @@
 <script src="analyzer2.js"></script>
 <script src="parser2.js"></script>
 <script src="compiler.js"></script>
+<script src="../acorn-master/acorn.js"></script>
 <script>
 var parserTests = [
 "x = a + 1 * 3 - x;",
@@ -24,12 +25,20 @@ cfgResults;
 var source = parserTests[6];
 
 var testParser = function () {
-    parserResults = parserTests.map(Parse);
+    parserTests.map(function (text) {
+        Parse("function a(){" + text + "}");
+    });
+};
+
+var testAcorn = function () {
+    parserTests.map(function (text) {
+        acorn.parse("function a(){" + text + "}");
+    });
 };
 
 var testCfg = function () {
     if (!parserResults) {
-        testParser();
+        parserResults = parserTests.map(Parse);
     }
     cfgResults = parserResults.map(CFG);
 };
