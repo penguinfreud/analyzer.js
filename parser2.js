@@ -7,8 +7,8 @@ TOKEN_OP = ++iter,
 TOKEN_PUNC = ++iter,
 TOKEN_EOF = ++iter;
 
-var _puncs = listToTable([44, 46, 58, 59, 40, 41, 91, 93, 123, 125]);
-var _notAllowRegExp = listToTable(["this", "true", "false", "null", 46, 41, 93, 125]);
+var _puncs = listToTable([44, 58, 59, 40, 41, 91, 93, 123, 125]);
+var _notAllowRegExp = listToTable(["this", "true", "false", "null", 41, 93, 125]);
 var _hashOpTable = {}, _hashOpConfirm = {};
 function _hashOp(a, b, c) {
     var h = a;
@@ -78,8 +78,16 @@ var Lexer = extend(Object, {
             return this.identifier();
         } else if (ch === 34 || ch === 39) {
             return this.string(ch);
-        } else if (ch >= 48 && ch <= 57 || ch === 46) {
+        } else if (ch >= 48 && ch <= 57) {
             return this.number(ch);
+        } else if (ch === 46) {
+            ch = text.charCodeAt(pos + 1);
+            if (ch >= 48 && ch <= 57)
+                return this.number(46);
+            this.pos++;
+            this.space();
+            this.notAllowRegExp = 1;
+            return this.make(TOKEN_PUNC, 46);
         } else if (ch === 47) {
             if (this.notAllowRegExp && !forceRegExp) {
                 this.notAllowRegExp = 0;
@@ -359,7 +367,7 @@ var Parser = extend(Object, {
     },
     
     peek: function (forceRegExp, depth) {
-        var buf = this.buffer, tok, i = buf.length;
+        var buf = this.buffer, i = buf.length;
         if (!depth) depth = 1;
         if (i < depth) {
             buf.push(this.lexer.next(forceRegExp));
@@ -645,6 +653,7 @@ function For (p, pos) {
             ret.iterator = expr;
             return p.make(AST_FOR_IN, pos, ret);
         } else {
+            p.expect(59);
             ret = ForLoop(p);
             ret.init = expr;
             return p.make(AST_FOR_LOOP, pos, ret);
@@ -737,10 +746,12 @@ function VarDeclList(p, pos) {
 }
 
 function VarDecl(p, noIn) {
-    var pos = p.pos(), name, init = null;
+    var pos = p.pos(), name, init = null, token;
     name = p.expectIdent();
     checkId(name);
-    if (p.match(61)) {
+    token = p.peek();
+    if (token.type === TOKEN_OP && token.value === 38) {
+        p.next();
         init = AssignmentExpression(p, noIn);
     }
     return p.make(AST_VAR_DECL, pos, {
@@ -755,28 +766,29 @@ function Debugger(p, pos) {
 }
 
 function ArrayLiteral(p) {
-    var pos = p.pos(), array = [];
+    var pos = p.pos(), array = [], f = 0;
     if (!p.match(91)) return 0;
-    while (!p.finished()) {
-        if (p.match(44)) array.length++;
-        else array.push(AssignmentExpression(p));
+    while (true) {
         if (p.match(93))
             return p.make(ARRAY_LITERAL, pos, { value: array });
-        p.expect(44);
+        if (f) p.expect(44);
+        else f = 1;
+        if (p.peekMatch(44)) array.length++;
+        else array.push(AssignmentExpression(p));
     }
     p.raise("Expected ']'");
 }
 
 function ObjectLiteral(p) {
-    var pos = p.pos(), props = [], comma;
+    var pos = p.pos(), props = [], comma, f = 0;
     if (!p.match(123)) return 0;
-    while (!p.finished()) {
+    while (true) {
+        if (p.match(125))
+            return p.make(OBJECT_LITERAL, pos, { props: props });
+        if (f) comma || p.raise("Expected ','");
+        else f = 1;
         parseProperty(p, props);
         comma = p.match(44);
-        if (p.match(125)) {
-            return p.make(OBJECT_LITERAL, pos, { props: props });
-        }
-        comma || p.raise("Expected ','");
     }
     p.raise("expected '}'");
 };
@@ -811,12 +823,12 @@ var parsePropertyName = function (p) {
 };
 
 var parseArguments = function (p) {
-    var args = [];
-    if (p.match(44)) return args;
-    while (!p.finished()) {
-        args.push(AssignmentExpression(p));
+    var args = [], f = 0;
+    while (true) {
         if (p.match(41)) return args;
-        p.expect(44);
+        if (f) p.expect(44);
+        else f = 1;
+        args.push(AssignmentExpression(p));
     }
     p.raise("expected ')'");
 };
@@ -880,6 +892,7 @@ function AssignmentExpression(p, noIn) {
                     expr = ArrayLiteral(p) || ObjectLiteral(p);
                     if (!expr) {
                         if (value === 40) {
+                            p.next();
                             expr = Expression(p);
                             p.expect(41);
                         } else p.raise("Invalid");
@@ -902,11 +915,12 @@ function AssignmentExpression(p, noIn) {
                             p.make(CALL, expr.func.start, expr);
                     } else if (value === 91) {
                         p.next();
+                        a = Expression(p);
+                        p.expect(93);
                         expr = p.make(MEMBER, expr.start, {
                             obj: expr,
-                            prop: Expression(p)
+                            prop: a
                         });
-                        p.expect(93);
                     } else if (value === 46) {
                         p.next();
                         token = p.next();
@@ -944,6 +958,7 @@ function AssignmentExpression(p, noIn) {
             prefixPos.push(pos);
         } else {
             if (op >= 15) {
+                if (state) p.raise("Invalid");
                 while (prefix.length > 0)
                     expr = p.make(UNARY, prefixPos.pop(), {
                         operator: prefix.pop(),

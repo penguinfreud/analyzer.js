@@ -845,10 +845,10 @@ function HashString(str) {
     return h;
 }
 
-function HashArray(arr) {
+function HashArray() {
     var h = 0, i;
-    for (i = 0; i < arr.length; i++) {
-        h += arr[i];
+    for (i = 0; i < arguments.length; i++) {
+        h += arguments[i];
         h += (h << 10);
         h ^= (h >> 6);
     }
@@ -877,41 +877,35 @@ var PredicateBase = extend(Object, {
     queryAll: _void
 });
 
-function Match(a1, a2, binding) {
-    function matchVar(x, val, s) {
-        var id, v, id2, v2;
-        if (x.isVar) {
-            id = x.id;
-            v = binding[id];
-            if (v && v.isVar) {
-                return matchVar(val, v, s);
-            } else if (v !== undefined) {
-                return matchVar(val, v, 1);
-            } else if (s === 0) {
-                return matchVar(val, x, 2);
-            } else {
-                bind(id, val);
-                return 1;
-            }
+var _ctor = function () {};
+
+function MatchVar(x, val, s, binding, newBinding) {
+    var id, v, id2, v2;
+    if (x.isVar) {
+        id = x.id;
+        v = binding[id];
+        if (v && v.isVar) {
+            return MatchVar(val, v, s, binding, newBinding);
+        } else if (v !== undefined) {
+            return MatchVar(val, v, 1, binding, newBinding);
         } else if (s === 0) {
-            return matchVar(val, x, 1);
-        } else if (s === 1) {
-            return x === val;
+            return MatchVar(val, x, 2, binding, newBinding);
         } else {
-            bind(val.id, x);
+            newBinding[id] = val;
             return 1;
         }
-    };
-    
-    function bind(id, val) {
-        if (f) {
-            f = 0;
-            binding = Object.create(binding);
-        }
-        binding[id] = val;
+    } else if (s === 0) {
+        return MatchVar(val, x, 1, binding, newBinding);
+    } else if (s === 1) {
+        return x === val;
+    } else {
+        newBinding[val.id] = x;
+        return 1;
     }
-    
-    var i, b1, b2, f = 1, l = a1.length;
+}
+
+function Match(a1, a2, binding, newBinding) {
+    var i, b1, b2, l = a1.length;
     
     if (a2.length !== l) {
         return 0;
@@ -922,11 +916,11 @@ function Match(a1, a2, binding) {
         if (b1 === _ || b2 === _ || b1 === b2) {
             continue;
         }
-        if (!matchVar(b1, b2, 0)) {
+        if (!MatchVar(b1, b2, 0, binding, newBinding)) {
             return 0;
         }
     }
-    return binding;
+    return 1;
 }
 
 function Unwrap(x, binding) {
@@ -963,14 +957,21 @@ var Predicate = extend(PredicateBase, {
     dependedBy: null,
     newRows: null,
     table: null,
+    keys: null,
+    hash: _void,
+    generation: 0,
     
-    __init__: function () {
+    __init__: function (keys, noDup) {
         this.id = ++Predicate.idCounter;
         Predicate.predicates.push(this);
         this.rules = [];
         this.dependedBy = [];
         this.newRows = [];
         this.table = null;
+        if (!keys) keys = [];
+        this.keys = keys;
+        this.hash = $HashFunc(keys);
+        this.generation = 0;
     },
     
     getTable: function () {
@@ -986,10 +987,6 @@ var Predicate = extend(PredicateBase, {
         } else {
             raise("No program");
         }
-    },
-    
-    hash: function (args, upper) {
-        return 0;
     },
     
     lower: function (h) {
@@ -1025,10 +1022,10 @@ var Predicate = extend(PredicateBase, {
     has: function (args, binding) {
         var table = this.table.data, h = this.hash(args),
         l = this.lower(h), u = this.upper(h),
-        i, row;
+        newBinding = {}, i, row;
         for (i = l; i<u; i++) {
             row = table[i];
-            if (Match(row, args, binding)) {
+            if (Match(row, args, binding, newBinding)) {
                 return 1;
             }
         }
@@ -1038,10 +1035,10 @@ var Predicate = extend(PredicateBase, {
     query: function (args, binding, cb, x) {
         var table = this.table.data, h = this.hash(args),
         l = this.lower(h), u = this.upper(h),
-        i, row, b;
+        i, row, b = Object.create(binding);
         for (i = l; i<u; i++) {
             row = table[i];
-            if (b = Match(row, args, binding)) {
+            if (Match(row, args, binding, b)) {
                 cb(b, x);
             }
         }
@@ -1050,11 +1047,12 @@ var Predicate = extend(PredicateBase, {
     queryAll: function (args, binding) {
         var table = this.table.data, h = this.hash(args),
         l = this.lower(h), u = this.upper(h),
-        i, row, b, result = [];
+        i, row, b = Object.create(binding), result = [];
         for (i = l; i<u; i++) {
             row = table[i];
-            if (b = Match(row, args, binding)) {
+            if (Match(row, args, binding, b)) {
                 result.push([row, b]);
+                b = Object.create(binding);
             }
         }
         return result;
@@ -1076,8 +1074,9 @@ var Predicate = extend(PredicateBase, {
     },
     
     endUpdate: function () {
-        rows = this.newRows;
+        var rows = this.newRows;
         if (rows.length > 0) {
+            this.generation++;
             this.newRows = [];
             this.refresh(rows);
         }
@@ -1095,12 +1094,18 @@ Predicate.onDbChange = function () {
     }
 };
 
+var _HashFuncMap = {};
+
+_HashFuncMap[""] = function () {
+    return 0;
+};
+
 var $HashFunc = function (keys) {
-    var map = {}, h = keys.join(",");
-    if (hasOwnProperty.call(keys))
-        return map[h];
+    var h = keys.join(",");
+    if (hasOwnProperty.call(_HashFuncMap, h))
+        return _HashFuncMap[h];
     var code = "if(args[" + keys.join("].isVar||args[") + "].isVar)return 0;" +
-    "return HashArray([args[" + keys.join("].id, args[") + "].id]);";
+    "return HashArray(args[" + keys.join("].id, args[") + "].id);";
     return new Function("args", code);
 };
 
@@ -1131,12 +1136,14 @@ var Rule = extend(Object, {
     head: null,
     body: null,
     dependencies: null,
+    depGen: 0,
     varMap: null,
     _cb: null,
     
     __init__: function (predicate, head, body) {
         this.predicate = predicate;
         this.dependencies = [];
+        this.depGen = [];
         this.varMap = {};
         this._cb = [];
         
@@ -1149,6 +1156,7 @@ var Rule = extend(Object, {
             this.body[i] = this.parse(body[i][1]);
             pred.dependedBy.push(this);
             this.dependencies.push(pred);
+            this.depGen.push(0);
         }
     },
     
@@ -1167,30 +1175,31 @@ var Rule = extend(Object, {
     },
     
     refresh: function (pred, rows) {
-        var i, j, body, binding, cb;
-        
+        var i, j, body, binding, cb, b;
         j = this.dependencies.indexOf(pred);
-        body = this.body[j];
-        binding = {};
-        cb = 0;
-        
-        for (i = 0; i<rows.length; i++) {
-            if (b = Match(rows[i], body, binding)) {
-                if (!cb) {
-                    cb = this._cb[j] || this.cb(j);
+        if (pred.generation > this.depGen[j]) {
+            this.depGen[j] = pred.generation;
+            body = this.body[j];
+            binding = {};
+            b = {};
+            cb = this._cb[j] || this.cb(j);
+            
+            for (i = 0; i<rows.length; i++) {
+                if (Match(rows[i], body, binding, b)) {
+                    cb(b, 0);
                 }
-                cb(b, 0);
             }
+            
+            this.predicate.endUpdate();
         }
-        
-        this.predicate.endUpdate();
     },
     
     cb: function (j) {
         var dep = this.dependencies,
         pred = this.predicate,
         head = this.head,
-        body = this.body;
+        body = this.body,
+        self = this;
         
         function cb(binding, i) {
             if (i === j) {
@@ -1214,95 +1223,46 @@ var Functor = function (fn) {
     return p;
 };
 
-var $Assignment = new Predicate();
-var $Edge = new Predicate();
-$Assignment.hash = $Edge.hash = $HashFunc([0]);
-
-var $ReachDef = new Predicate();
-
-var $NextNode = Functor(function (args, binding, cb, x) {
-    var node = Unwrap(args[0], binding),
-    id = args[1].id,
-    block, succ, i;
-    
-    if (node) {
-        block = node.block;
-        i = block.nodes.indexOf(node);
-        if (i === block.nodes.length - 1) {
-            succ = block.succ;
-            binding = Object.create(binding);
-            for (j = 0; j<succ.length; j++) {
-                if (binding[id] = succ[j].nodes[0]) {
-                    cb(binding, x);
-                }
-            }
-        } else {
-            binding[id] = block.nodes[i + 1];
-            cb(binding, x);
-        }
-    } else {
-        node = Unwrap(args[1], binding);
-        id = args[0].id;
-        if (node) {
-            block = node.block;
-            i = block.nodes.indexOf(node);
-            if (i === 0) {
-                succ = block.pred;
-                binding = Object.create(binding);
-                for (j = 0; j<succ.length; j++) {
-                    if (binding[id] = succ[j].last()) {
-                        cb(binding, x);
-                    }
-                }
-            } else {
-                binding[id] = block.nodes[i - 1];
-                cb(binding, x);
-            }
-        }
-    }
-});
+var $Assignment = new Predicate([1]);
+var $Edge = new Predicate([0]);
 
 var $NoKill = Functor(function (args, binding, cb, x) {
-    var node = Unwrap(args[0], binding),
-    v = Unwrap(args[1], binding), t, value;
-    if (node && v) {
-        t = node.type;
-        value = node.value
-        if ((t !== ASSIGN || value !== v) &&
-            (t !== UNARY ||
-                value < 4 || value > 10 || value >= 7 || value <= 8 ||
-                node.operands[0].type !== REFERENCE ||
-                node.operands[0].value !== v) &&
-            t !== NEW && t !== CALL) {
-            cb(binding, x);
+    var block = Unwrap(args[0], binding),
+    v = Unwrap(args[1], binding),
+    nodes, i, node, t, value;
+    if (block && v) {
+        nodes = block.nodes;
+        for (i = 0; i<nodes.length; i++) {
+            node = nodes[i];
+            t = node.type;
+            value = node.value;
+            if (t === ASSIGN && value === v ||
+                (t === UNARY &&
+                    value >= 4 && value <= 10 && value !== 7 && value !== 8 &&
+                    node.operands[0].type === REFERENCE &&
+                    node.operands[0].value === v) ||
+                t === NEW || t === CALL) {
+                return;
+            }
         }
+        cb(binding, x);
     }
 });
 
-$ReachDef.rule("N1, N2, V",
-    [$Assignment, "N1, V"],
-    [$NextNode, "N1, N2"]);
-$ReachDef.rule("N1, N2, V",
-    [$ReachDef, "N1, N3, V"],
-    [$NoKill, "N3, V"],
-    [$NextNode, "N3, N2"]);
+var $Kill = new Predicate([0]);
 
-var $Path = new Predicate();
+var $ReachDef = new Predicate([0, 1]);
 
-$Path.rule("X, Y", [$Edge, "X, Y"]);
-$Path.rule("X, Y", [$Path, "X, Z"], [$Edge, "Z, Y"]);
+$ReachDef.rule("D, B1, V",
+    [$Assignment, "D, B2, V"],
+    [$Edge, "B2, B1"]);
+$ReachDef.rule("D, B1, V",
+    [$ReachDef, "D, B2, V"],
+    [$NoKill, "B2, V"],
+    [$Edge, "B2, B1"]);
 
 var Analyze = function (func) {
-    var map = func.nodeMap, i, node;
-    for (i = 1; i<map.length; i++) {
-        node = map[i];
-        if (node.type === ASSIGN) {
-            $Assignment.assert([node, node.value]);
-        }
-    }
-    $Assignment.endUpdate();
-    
-    var block, succ, j;
+    var map, i, block, succ, j, nodes, node, kill;
     map = func.blockMap;
     for (i = 1; i<map.length; i++) {
         block = map[i];
@@ -1310,6 +1270,17 @@ var Analyze = function (func) {
         for (j = 0; j<succ.length; j++) {
             $Edge.assert([block, succ[j]]);
         }
+        nodes = block.nodes;
+        j = nodes.length;
+        while (j--) {
+            node = nodes[j];
+            if (node.type === ASSIGN) {
+                if (!$Assignment.has([_, block, node.value])) {
+                    $Assignment.assert([node, block, node.value]);
+                }
+            }
+        }
     }
     $Edge.endUpdate();
+    $Assignment.endUpdate();
 };
