@@ -820,17 +820,35 @@ var getDominator = function (block, stack, reverse) {
 };
 
 var computeDominators = function (func) {
-	var list = func.blockMap, i, l = list.length;
+	var list = func.blockMap, i, l = list.length, block;
 	for (i = 1; i<l; i++) {
-		getDominator(list[i], [], 0);
+		block = list[i];
+		block && getDominator(block, [], 0);
 	}
 };
 
 var computePostDominators = function (func) {
-	var list = func.blockMap, i = list.length;
+	var list = func.blockMap, i = list.length, block;
 	while (--i) {
-		getDominator(list[i], [], 1);
+		block = list[i];
+		block && getDominator(block, [], 1);
 	}
+};
+
+var Dom = function (a, b) {
+    while (b) {
+        if (a === b) return 1;
+        b = b.dominator;
+    }
+    return 0;
+};
+
+var Pdom = function (a, b) {
+    while (b) {
+        if (a === b) return 1;
+        b = b.postDominator;
+    }
+    return 0;
 };
 
 function HashString(str) {
@@ -1033,10 +1051,9 @@ var Predicate = extend(PredicateBase, {
 var t=this.table.data,
 h=r.hashFuncs[j][i](0,b),
 l=this.lower(h),u=this.upper(h,l),
-b=Object.create(b),
 m=r.matchers[j][i];
 for(;l<u;l++)
-if(m(t[l],b,b))r.cb(b,j,i+1);
+if(m(t[l],b))r.cb(b,j,i+1);
 },
 	
 	queryAll: function (args, binding) {
@@ -1168,11 +1185,11 @@ var Rule = extend(Object, {
 	
 	refresh: function (p, r) {
 		var i, j = this.dep.indexOf(p),
-		body = this.body[j],
-		b = {}, nb = {};
-		for (i = 0; i<r.length; i++)
-			if (Match(r[i], body, b, nb))
-				this.cb(nb, j, 0);
+		b = {}, m = this.matchers[j][j];
+		for (i = 0; i<r.length; i++) {
+			m(r[i], b);
+			this.cb(b, j, 0);
+		}
 		this.predicate.endUpdate();
 	},
 	
@@ -1183,60 +1200,63 @@ var Rule = extend(Object, {
 		else dep[i]._query(b, this, j, i);
 	},
 	
-	compileMatchers: function () {
-		var _body = this.body, i, j, k, m, l = _body.length,
-		matchers = this.matchers, dep = this.dep,
-		hashFuncs = this.hashFuncs,
-		id, code, body, binding, keys, noHash,
-		bound = [], cond = [], bind = [], dup;
-		for (j = 0; j<l; j++) {
-			body = _body[j];
-			binding = {};
-			for (k = 0; k<body.length; k++) {
-				binding[body[k].id] = 1;
+	compileMatcher: function (binding, j, i) {
+		var m, id, code, k;
+		body = this.body[i],
+		bound = [],
+		cond = [],
+		bind = [],
+		dup = {},
+		keys = this.dep[i].keys,
+		noHash = 0;
+		for (k = 0; k<body.length; k++) {
+			id = body[k].id;
+			m = keys.indexOf(k);
+			if (binding[id] === 1) {
+				if (m >= 0) bound[m] = id;
+				cond.push("a[" + k + "]===b[" + id + "]");
+				continue;
 			}
-			matchers[j] = [];
-			hashFuncs[j] = [];
+			if (m >= 0) noHash = 1;
+			if (typeof dup[id] === "number") {
+				cond.push("a[" + k + "]===a[" + dup[id] + "]");
+			} else {
+				dup[id] = k;
+				bind.push("b[" + id + "]=a[" + k + "];");
+			}
+		}
+		for (k = 0; k<body.length; k++) {
+			binding[body[k].id] = 1;
+		}
+		if (cond.length > 0) {
+			code = "if(" + cond.join("&&") + "){";
+		} else {
+			code = "";
+		}
+		code += bind.join("") + "return 1;";
+		if (cond.length > 0) {
+			code += "}return 0;";
+		}
+		this.matchers[j][i] = new Function("a,b", code);
+		code = noHash?
+			"return 0;":
+			"return HashArray(b[" + bound.join("].id,b[") + "].id);";
+		this.hashFuncs[j][i] = new Function("a,b", code);
+	},
+	
+	compileMatchers: function () {
+		var i, j, l = this.body.length, binding;
+		for (j = 0; j<l; j++) {
+			if (this.dep[j].isFunctor) continue;
+			binding = {};
+			this.matchers[j] = [];
+			this.hashFuncs[j] = [];
+			this.compileMatcher(binding, j, j);
 			for (i = 0; i<l; i++) {
 				if (i === j) continue;
-				body = _body[i];
-				if (dep[i].isFunctor) {
-					matchers[j][i] = body;
-					hashFuncs[j][i] = _void;
-					continue;
+				if (!this.dep[i].isFunctor) {
+					this.compileMatcher(binding, j, i);
 				}
-				bound.length = 0;
-				cond.length = 0;
-				bind.length = 0;
-				dup = {};
-				keys = dep[i].keys;
-				noHash = 0;
-				for (k = 0; k<body.length; k++) {
-					id = body[k].id;
-					m = keys.indexOf(k);
-					if (binding[id] === 1) {
-						if (m >= 0) bound[m] = id;
-						cond.push("a[" + k + "]===b[" + id + "]");
-						continue;
-					}
-					if (m >= 0) noHash = 1;
-					if (typeof dup[id] === "number") {
-						cond.push("a[" + k + "]===a[" + dup[id] + "]");
-					} else {
-						dup[id] = k;
-						bind.push("c[" + id + "]=a[" + k + "];");
-					}
-				}
-				for (k = 0; k<body.length; k++) {
-					binding[body[k].id] = 1;
-				}
-				code = "if(" + cond.join("&&") + "){" +
-					bind.join("") + "return 1;}return 0;";
-				matchers[j][i] = new Function("a,b,c", code);
-				code = noHash?
-					"return 0;":
-					"return HashArray(b[" + bound.join("].id,b[") + "].id);";
-				hashFuncs[j][i] = new Function("a,b", code);
 			}
 		}
 	}
@@ -1262,7 +1282,19 @@ var Functor = extend(Predicate, {
 });
 
 var $Assignment = new Predicate([1]);
-var $Edge = new Predicate([0]);
+
+var $Edge = new Functor(function (binding, rule, _j, _i) {
+	var args = rule.body[_i],
+	block = Unwrap(args[0], binding),
+	succ, i;
+	if (block) {
+		succ = block.succ;
+		for (i = 0; i<succ.length; i++) {
+			binding[args[1].id] = succ[i];
+			rule.cb(binding, _j, _i + 1);
+		}
+	}
+});
 
 var $NoKill = new Functor(function (binding, rule, _j, _i) {
 	var args = rule.body[_i],
@@ -1309,27 +1341,48 @@ $ReachDef.rule("D, B1, V",
 	[$NoKill, "B2, V"],
 	[$Edge, "B2, B1"]);
 
+var Path = function (X, Y, visited) {
+	while (X.succ.length === 1)
+		X = X.succ[0];
+	while (Y.pred.length === 1)
+		Y = Y.pred[0];
+	var succ = X.succ, i, b;
+	if (succ.indexOf(Y) >= 0) return 1;
+	if (!visited) visited = {};
+	for (i = 0; i<succ.length; i++) {
+		b = succ[i];
+		if (visited[b.id]) continue;
+		visited[b.id] = 1;
+		if (Path(succ[i], Y, visited)) return 1;
+	}
+	return 0;
+};
+
 var Purge = function (func) {
-	var i, map = func.blockMap, block, b2, succ, pred, j, k, node, l;
+	var i, map = func.blockMap, block, b2, type, succ, pred, j, k, node, l;
 	for (i = 1; i<map.length; i++) {
 		if (block = map[i]) {
 			if (block.succ.length === 1) {
 				b2 = block.succ[0];
-				if (block.nodes.length === 0) {
+				type = block.type;
+				if (block.nodes.length === 0 &&
+					type !== BLOCK_ENTRY &&
+					type !== BLOCK_EXIT) {
 					pred = block.pred;
 					k = b2.pred.indexOf(block);
-					b2.pred.splice(k, 1);
-					push.apply(b2.pred, pred);
+					Array.prototype.splice.apply(b2.pred, [k, 1].concat(pred));
 					for (j = 0; j<pred.length; j++) {
 						succ = pred[j].succ;
 						k = succ.indexOf(block);
 						succ[k] = b2;
 					}
 					map[i] = null;
-				} else if (b2.pred.length === 1 && block.type === b2.type) {
+					console.log("empty", i);
+				} else if (b2.pred.length === 1 && type === b2.type) {
 					push.apply(block.nodes, b2.nodes);
 					block.succ = b2.succ;
 					map[b2.id] = null;
+					console.log("connect", b2.id);
 				}
 			}
 		}
@@ -1337,18 +1390,9 @@ var Purge = function (func) {
 };
 
 var Analyze = function (func) {
-	var map, i, block, succ, j, nodes, node, kill;
+	var map, i, block, j, nodes, node;
 	Purge(func);
 	map = func.blockMap;
-	for (i = 1; i<map.length; i++) {
-		if (block = map[i]) {
-			succ = block.succ;
-			for (j = 0; j<succ.length; j++) {
-				$Edge.assert([block, succ[j]]);
-			}
-		}
-	}
-	$Edge.endUpdate();
 	for (i = 1; i<map.length; i++) {
 		if (block = map[i]) {
 			nodes = block.nodes;
